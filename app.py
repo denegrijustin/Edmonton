@@ -1,6 +1,4 @@
-import math
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -421,7 +419,7 @@ def extract_player_games(game_row: pd.Series, box: Dict[str, Any], roster_df: pd
 def extract_goal_events(schedule_df: pd.DataFrame, roster_df: pd.DataFrame) -> pd.DataFrame:
     roster_ids = set(roster_df["playerId"].dropna().astype(int).tolist()) if not roster_df.empty else set()
     events_out: List[Dict[str, Any]] = []
-    completed = schedule_df[schedule_df["isCompleted"]].copy()
+    completed = schedule_df[schedule_df["isCompleted"]]
     for _, g in completed.iterrows():
         try:
             pbp = get_play_by_play(int(g["gameId"]))
@@ -453,6 +451,8 @@ def extract_goal_events(schedule_df: pd.DataFrame, roster_df: pd.DataFrame) -> p
                 if isinstance(val, int) and ("playerId" in key or key.endswith(".id")):
                     event_player_ids.add(val)
             oilers_on_event = bool(roster_ids.intersection(event_player_ids))
+            nx = pd.to_numeric(x, errors="coerce")
+            ny = pd.to_numeric(y, errors="coerce")
 
             events_out.append(
                 {
@@ -461,13 +461,13 @@ def extract_goal_events(schedule_df: pd.DataFrame, roster_df: pd.DataFrame) -> p
                     "opponent": opponent_from_row(g),
                     "venue": "Home" if g["homeTeam"] == TEAM_TRI else "Away",
                     "period": period,
-                    "x": pd.to_numeric(x, errors="coerce"),
-                    "y": pd.to_numeric(y, errors="coerce"),
+                    "x": nx,
+                    "y": ny,
                     "teamFor": scoring_team,
                     "isOilersGoal": is_oilers_goal,
                     "strength": str(strength),
                     "scorerId": scorer_id,
-                    "zone": classify_zone(pd.to_numeric(x, errors="coerce"), pd.to_numeric(y, errors="coerce")),
+                    "zone": classify_zone(nx, ny),
                     "eventHasOilersPlayerId": oilers_on_event,
                     "homeTeam": home_team,
                     "awayTeam": away_team,
@@ -481,7 +481,7 @@ def extract_goal_events(schedule_df: pd.DataFrame, roster_df: pd.DataFrame) -> p
 def build_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     schedule = get_schedule()
     roster = get_roster()
-    completed = schedule[schedule["isCompleted"]].copy()
+    completed = schedule[schedule["isCompleted"]]
     team_rows = []
     player_parts = []
     for _, g in completed.iterrows():
@@ -595,7 +595,7 @@ def plot_rink_heatmap(df: pd.DataFrame, title: str) -> go.Figure:
 
 # ---------- Outlook ----------
 def compute_outlook(team_games: pd.DataFrame, schedule: pd.DataFrame, standings: pd.DataFrame) -> Dict[str, Any]:
-    oilers = standings[standings["teamAbbrev"] == TEAM_TRI].copy()
+    oilers = standings[standings["teamAbbrev"] == TEAM_TRI]
     if oilers.empty:
         current_points = int(team_games["pointsEarned"].sum()) if not team_games.empty else 0
         games_played = len(team_games)
@@ -646,8 +646,7 @@ except Exception as e:
     st.error(f"Data load failed: {e}")
     st.stop()
 
-completed_games = team_games.copy()
-remaining_games_df = schedule[~schedule["isCompleted"]].copy().sort_values("gameDate")
+remaining_games_df = schedule[~schedule["isCompleted"]].sort_values("gameDate")
 outlook = compute_outlook(team_games, schedule, standings)
 
 st.title("Edmonton Oilers Trends Dashboard")
@@ -682,15 +681,13 @@ with st.container():
         default_player = "Connor McDavid" if "Connor McDavid" in player_options else (player_options[0] if player_options else None)
         player_selected = st.selectbox("Player Focus", player_options, index=player_options.index(default_player) if default_player in player_options else 0)
 
-team_games_view = team_games.copy()
-if venue_filter != "All":
-    team_games_view = team_games_view[team_games_view["venue"] == venue_filter].copy()
+team_games_view = team_games[team_games["venue"] == venue_filter] if venue_filter != "All" else team_games
 
-heat_events = goal_events.copy()
+heat_events = goal_events
 if venue_filter != "All" and not heat_events.empty:
-    heat_events = heat_events[heat_events["venue"] == venue_filter].copy()
+    heat_events = heat_events[heat_events["venue"] == venue_filter]
 if strength_filter != "All" and not heat_events.empty:
-    heat_events = heat_events[heat_events["strength"].astype(str).str.contains(strength_filter, case=False, na=False)].copy()
+    heat_events = heat_events[heat_events["strength"].astype(str).str.contains(strength_filter, case=False, na=False)]
 
 # Tabs
 team_tab, player_tab, heat_tab, outlook_tab, games_tab = st.tabs([
@@ -735,7 +732,7 @@ with player_tab:
     if player_games.empty:
         st.info("No player-game data available.")
     else:
-        latest = player_games.sort_values(["playerName", "gameDate", "gameId"]).groupby("playerName", as_index=False).tail(1).copy()
+        latest = player_games.sort_values(["playerName", "gameDate", "gameId"]).groupby("playerName", as_index=False).tail(1)
         latest = latest[["playerName", "position", "rollingGrade", "consistencyScore", "recent5AvgPoints", "seasonAvgPoints", "trendFlag", "toi_min"]].rename(columns={"rollingGrade": "Current Grade", "consistencyScore": "Consistency", "recent5AvgPoints": "Recent 5 Avg Pts", "seasonAvgPoints": "Season Avg Pts", "toi_min": "Last TOI"})
         top, bottom = st.columns([1.2, 1])
         with top:
@@ -755,8 +752,8 @@ with heat_tab:
     if heat_events.empty:
         st.info("No goal coordinate data available from play-by-play for the selected filters.")
     else:
-        gf = heat_events[heat_events["isOilersGoal"]].copy()
-        ga = heat_events[~heat_events["isOilersGoal"]].copy()
+        gf = heat_events[heat_events["isOilersGoal"]]
+        ga = heat_events[~heat_events["isOilersGoal"]]
         with left:
             st.plotly_chart(plot_rink_heatmap(gf, "Oilers Goals Scored Locations"), use_container_width=True)
         with right:
@@ -769,7 +766,7 @@ with heat_tab:
             selected_pid = int(player_id_lookup[player_id_lookup["playerName"] == player_selected]["playerId"].iloc[0])
 
         if selected_pid is not None:
-            player_heat = heat_events[heat_events["scorerId"].eq(selected_pid) | heat_events["eventHasOilersPlayerId"]].copy()
+            player_heat = heat_events[heat_events["scorerId"].eq(selected_pid) | heat_events["eventHasOilersPlayerId"]]
             ph_left, ph_right = st.columns(2)
             with ph_left:
                 ph_gf = player_heat[player_heat["isOilersGoal"]]
@@ -800,7 +797,7 @@ with outlook_tab:
     left, right = st.columns([1.2, 1])
     with left:
         if not team_games.empty:
-            pts_path = team_games[["gameDate", "cumulativePoints"]].copy()
+            pts_path = team_games[["gameDate", "cumulativePoints"]]
             pts_path["paceLine82"] = np.linspace(0, outlook["projected_points"], len(pts_path))
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=pts_path["gameDate"], y=pts_path["cumulativePoints"], mode="lines+markers", name="Actual"))
@@ -819,17 +816,15 @@ with outlook_tab:
             f"Gap to cutoff: {outlook['gap_to_cutoff'] if outlook['gap_to_cutoff'] is not None else 'N/A'}"
         )
         if not remaining_games_df.empty:
-            rem = remaining_games_df.copy()
-            rem["opponent"] = np.where(rem["homeTeam"] == TEAM_TRI, rem["awayTeam"], rem["homeTeam"])
+            rem = remaining_games_df.assign(opponent=np.where(remaining_games_df["homeTeam"] == TEAM_TRI, remaining_games_df["awayTeam"], remaining_games_df["homeTeam"]))
             st.markdown("### Remaining schedule")
             st.dataframe(rem[["gameDate", "homeTeam", "awayTeam", "opponent"]].rename(columns={"gameDate": "Date"}), use_container_width=True, hide_index=True)
 
 with games_tab:
     st.markdown("### Team game log")
     if not team_games.empty:
-        view = team_games.copy()
-        st.dataframe(view.style.format({"teamFaceoffPct": "{:.1f}", "rolling3GoalDiff": "{:.2f}", "rolling3ShotDiff": "{:.2f}", "momentumScore": "{:.1f}"}), use_container_width=True, hide_index=True)
+        st.dataframe(team_games.style.format({"teamFaceoffPct": "{:.1f}", "rolling3GoalDiff": "{:.2f}", "rolling3ShotDiff": "{:.2f}", "momentumScore": "{:.1f}"}), use_container_width=True, hide_index=True)
     st.markdown("### Player game log")
     if not player_games.empty:
-        pview = player_games[player_games["playerName"] == player_selected].copy()
+        pview = player_games[player_games["playerName"] == player_selected]
         st.dataframe(pview[["gameDate", "goals", "assists", "points", "shots", "toi_min", "gameGrade", "rollingGrade", "trendFlag"]].style.format({"toi_min": "{:.1f}", "gameGrade": "{:.1f}", "rollingGrade": "{:.1f}"}), use_container_width=True, hide_index=True)
