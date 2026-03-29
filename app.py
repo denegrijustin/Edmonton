@@ -179,6 +179,46 @@ def zscore(series: pd.Series) -> pd.Series:
     return (s - s.mean()) / std
 
 
+def _stoplight_grade(val: float) -> str:
+    if pd.isna(val):
+        return ""
+    if val >= 70:
+        return "background-color: #dcfce7; color: #166534"
+    if val >= 50:
+        return "background-color: #fef9c3; color: #713f12"
+    return "background-color: #fee2e2; color: #991b1b"
+
+
+def _stoplight_momentum(val: float) -> str:
+    if pd.isna(val):
+        return ""
+    if val > 55:
+        return "background-color: #dcfce7; color: #166534"
+    if val >= 45:
+        return "background-color: #fef9c3; color: #713f12"
+    return "background-color: #fee2e2; color: #991b1b"
+
+
+def _stoplight_damage(val: float) -> str:
+    if pd.isna(val):
+        return ""
+    if val > 60:
+        return "background-color: #fee2e2; color: #991b1b"
+    if val >= 45:
+        return "background-color: #fef9c3; color: #713f12"
+    return "background-color: #dcfce7; color: #166534"
+
+
+def _stoplight_result(val: str) -> str:
+    if val == "W":
+        return "background-color: #dcfce7; color: #166534"
+    if val == "OTL":
+        return "background-color: #fef9c3; color: #713f12"
+    if val == "L":
+        return "background-color: #fee2e2; color: #991b1b"
+    return ""
+
+
 def classify_zone(x: float, y: float) -> str:
     if pd.isna(x) or pd.isna(y):
         return "Unknown"
@@ -477,8 +517,46 @@ def extract_goal_events(schedule_df: pd.DataFrame, roster_df: pd.DataFrame) -> p
     return pd.DataFrame(events_out)
 
 
+def extract_shot_events(schedule_df: pd.DataFrame, roster_df: pd.DataFrame) -> pd.DataFrame:
+    events_out: List[Dict[str, Any]] = []
+    completed = schedule_df[schedule_df["isCompleted"]]
+    for _, g in completed.iterrows():
+        try:
+            pbp = get_play_by_play(int(g["gameId"]))
+        except Exception:
+            continue
+        plays = pbp.get("plays", pbp.get("gameEvents", [])) if isinstance(pbp, dict) else []
+        if not isinstance(plays, list):
+            continue
+        for ev in plays:
+            flat = flatten_dict(ev)
+            event_type = str(first_non_null(flat, ["typeDescKey", "eventType", "typeCode"], "")).lower()
+            if not any(t in event_type for t in ["shot", "goal", "miss"]):
+                continue
+            x = first_non_null(flat, ["details.xCoord", "xCoord", "x"])
+            y = first_non_null(flat, ["details.yCoord", "yCoord", "y"])
+            shooting_team = first_non_null(flat, ["details.eventOwnerTeamAbbrev", "teamAbbrev"])
+            strength = first_non_null(flat, ["details.strength", "situationCode", "details.situationCode"])
+            nx = pd.to_numeric(x, errors="coerce")
+            ny = pd.to_numeric(y, errors="coerce")
+            events_out.append(
+                {
+                    "gameId": int(g["gameId"]),
+                    "gameDate": g["gameDate"],
+                    "venue": "Home" if g["homeTeam"] == TEAM_TRI else "Away",
+                    "x": nx,
+                    "y": ny,
+                    "isOilersShot": shooting_team == TEAM_TRI,
+                    "strength": str(strength),
+                    "zone": classify_zone(nx, ny),
+                    "eventType": event_type,
+                }
+            )
+    return pd.DataFrame(events_out)
+
+
 @st.cache_data(ttl=3600, show_spinner=True)
-def build_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def build_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     schedule = get_schedule()
     roster = get_roster()
     completed = schedule[schedule["isCompleted"]]
@@ -541,50 +619,105 @@ def build_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame
             default="Stable",
         )
     goal_events = extract_goal_events(schedule, roster)
+    shot_events = extract_shot_events(schedule, roster)
     standings = get_standings()
-    return schedule, team_games, player_games, goal_events, standings
+    return schedule, team_games, player_games, goal_events, standings, shot_events
 
 
 # ---------- Charts ----------
+_CHART_LAYOUT = dict(template="plotly_white", margin=dict(l=20, r=20, t=50, b=10))
+_SPLINE = dict(shape="spline", smoothing=1.2)
+
+
 def plot_team_trend(team_games: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=team_games["gameDate"], y=team_games["rolling3GoalDiff"], mode="lines+markers", name="Rolling 3 Goal Diff"))
-    fig.add_trace(go.Scatter(x=team_games["gameDate"], y=team_games["rolling3ShotDiff"], mode="lines+markers", name="Rolling 3 Shot Diff", yaxis="y2"))
+    fig.add_trace(go.Scatter(
+        x=team_games["gameDate"], y=team_games["rolling3GoalDiff"],
+        mode="lines+markers", name="Rolling 3 Goal Diff",
+        line={**_SPLINE, "color": "#3b82f6", "width": 2.5},
+        marker=dict(size=6),
+    ))
+    fig.add_trace(go.Scatter(
+        x=team_games["gameDate"], y=team_games["rolling3ShotDiff"],
+        mode="lines+markers", name="Rolling 3 Shot Diff", yaxis="y2",
+        line={**_SPLINE, "color": "#f59e0b", "width": 2},
+        marker=dict(size=5),
+    ))
+    fig.add_hline(y=0, line_dash="dot", line_color="#cbd5e1", line_width=1)
     fig.update_layout(
+        **_CHART_LAYOUT,
         title="Recent Form Trend",
-        template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         yaxis=dict(title="Goal Diff"),
         yaxis2=dict(title="Shot Diff", overlaying="y", side="right"),
         height=420,
-        margin=dict(l=20, r=20, t=50, b=10),
     )
     return fig
 
 
 def plot_momentum(team_games: pd.DataFrame) -> go.Figure:
-    fig = px.line(team_games, x="gameDate", y="momentumScore", markers=True, title="Momentum Score")
-    fig.update_layout(template="plotly_white", height=350, margin=dict(l=20, r=20, t=50, b=10))
-    fig.add_hline(y=50, line_dash="dash", line_color="#94a3b8")
+    ms = team_games["momentumScore"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=team_games["gameDate"], y=ms,
+        mode="lines+markers",
+        line={**_SPLINE, "color": "#8b5cf6", "width": 2.5},
+        marker=dict(size=6, color=ms, colorscale=[[0, "#ef4444"], [0.45, "#ef4444"], [0.45, "#f59e0b"], [0.55, "#f59e0b"], [0.55, "#22c55e"], [1, "#22c55e"]], cmin=30, cmax=70, showscale=False),
+        fill="tozeroy",
+        fillcolor="rgba(139,92,246,0.07)",
+        name="Momentum",
+    ))
+    fig.add_hline(y=50, line_dash="dash", line_color="#94a3b8", line_width=1)
+    fig.add_hrect(y0=55, y1=100, fillcolor="#22c55e", opacity=0.04, line_width=0)
+    fig.add_hrect(y0=0, y1=45, fillcolor="#ef4444", opacity=0.04, line_width=0)
+    fig.update_layout(**_CHART_LAYOUT, title="Momentum Score", height=350)
+    return fig
+
+
+def plot_impact_chart(team_games: pd.DataFrame) -> go.Figure:
+    gd = team_games["goalDiff"]
+    colors = ["#22c55e" if v > 0 else "#ef4444" if v < 0 else "#f59e0b" for v in gd]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=team_games["gameDate"], y=gd,
+        marker_color=colors, opacity=0.75, name="Goal Diff",
+        hovertemplate="<b>%{x|%b %d}</b><br>Goal diff: %{y}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=team_games["gameDate"], y=team_games["rolling3GoalDiff"],
+        mode="lines", name="3-Game Trend",
+        line={**_SPLINE, "color": "#1d4ed8", "width": 2.5},
+    ))
+    fig.add_hline(y=0, line_dash="dot", line_color="#94a3b8", line_width=1)
+    fig.update_layout(
+        **_CHART_LAYOUT,
+        title="Game Impact — Positive / Neutral / Negative",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=360,
+    )
     return fig
 
 
 def plot_player_progress(player_games: pd.DataFrame, player_name: str) -> go.Figure:
     df = player_games[player_games["playerName"] == player_name].copy()
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["gameDate"], y=df["rollingGrade"], mode="lines+markers", name="Rolling Grade"))
-    fig.add_trace(go.Bar(x=df["gameDate"], y=df["points"], name="Points", opacity=.35))
-    fig.update_layout(template="plotly_white", height=420, title=f"{player_name} Progression", margin=dict(l=20, r=20, t=50, b=10))
+    fig.add_trace(go.Scatter(
+        x=df["gameDate"], y=df["rollingGrade"],
+        mode="lines+markers", name="Rolling Grade",
+        line={**_SPLINE, "color": "#3b82f6", "width": 2.5},
+        marker=dict(size=6),
+    ))
+    fig.add_trace(go.Bar(x=df["gameDate"], y=df["points"], name="Points", opacity=0.3, marker_color="#6366f1"))
+    fig.add_hrect(y0=70, y1=100, fillcolor="#22c55e", opacity=0.05, line_width=0)
+    fig.add_hrect(y0=0, y1=50, fillcolor="#ef4444", opacity=0.05, line_width=0)
+    fig.update_layout(**_CHART_LAYOUT, height=420, title=f"{player_name} Progression")
     return fig
 
 
 def plot_rink_heatmap(df: pd.DataFrame, title: str) -> go.Figure:
     fig = px.density_heatmap(
-        df,
-        x="x",
-        y="y",
-        nbinsx=30,
-        nbinsy=26,
+        df, x="x", y="y",
+        nbinsx=30, nbinsy=26,
         color_continuous_scale="YlOrRd",
         title=title,
     )
@@ -641,7 +774,7 @@ def compute_outlook(team_games: pd.DataFrame, schedule: pd.DataFrame, standings:
 
 # ---------- App ----------
 try:
-    schedule, team_games, player_games, goal_events, standings = build_data()
+    schedule, team_games, player_games, goal_events, standings, shot_events = build_data()
 except Exception as e:
     st.error(f"Data load failed: {e}")
     st.stop()
@@ -689,6 +822,12 @@ if venue_filter != "All" and not heat_events.empty:
 if strength_filter != "All" and not heat_events.empty:
     heat_events = heat_events[heat_events["strength"].astype(str).str.contains(strength_filter, case=False, na=False)]
 
+shot_events_view = shot_events
+if venue_filter != "All" and not shot_events_view.empty:
+    shot_events_view = shot_events_view[shot_events_view["venue"] == venue_filter]
+if strength_filter != "All" and not shot_events_view.empty:
+    shot_events_view = shot_events_view[shot_events_view["strength"].astype(str).str.contains(strength_filter, case=False, na=False)]
+
 # Tabs
 team_tab, player_tab, heat_tab, outlook_tab, games_tab = st.tabs([
     "Team Trends",
@@ -699,11 +838,14 @@ team_tab, player_tab, heat_tab, outlook_tab, games_tab = st.tabs([
 ])
 
 with team_tab:
+    _tgv = team_games_view if not team_games_view.empty else team_games
     lcol, rcol = st.columns([1.35, 1])
     with lcol:
-        st.plotly_chart(plot_team_trend(team_games_view if not team_games_view.empty else team_games), use_container_width=True)
+        st.plotly_chart(plot_team_trend(_tgv), use_container_width=True)
     with rcol:
-        st.plotly_chart(plot_momentum(team_games_view if not team_games_view.empty else team_games), use_container_width=True)
+        st.plotly_chart(plot_momentum(_tgv), use_container_width=True)
+
+    st.plotly_chart(plot_impact_chart(_tgv), use_container_width=True)
 
     st.markdown("### Opponent damage profile")
     if not team_games.empty:
@@ -723,7 +865,9 @@ with team_tab:
             - 0.20 * zscore(opp_profile["avgGoalDiff"]).fillna(0)
         ) * 10 + 50
         st.dataframe(
-            opp_profile.sort_values("damageIndex", ascending=False).style.format({"avgGoalDiff": "{:.2f}", "avgShotsAgainst": "{:.1f}", "damageIndex": "{:.1f}"}, na_rep="-"),
+            opp_profile.sort_values("damageIndex", ascending=False)
+            .style.format({"avgGoalDiff": "{:.2f}", "avgShotsAgainst": "{:.1f}", "damageIndex": "{:.1f}"}, na_rep="-")
+            .applymap(_stoplight_damage, subset=["damageIndex"]),
             use_container_width=True,
             hide_index=True,
         )
@@ -740,11 +884,36 @@ with player_tab:
         with bottom:
             selected_latest = latest[latest["playerName"] == player_selected]
             st.markdown("### Player snapshot")
-            st.dataframe(selected_latest.style.format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}, na_rep="-"), use_container_width=True, hide_index=True)
+            st.dataframe(
+                selected_latest.style
+                .format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}, na_rep="-")
+                .applymap(_stoplight_grade, subset=["Current Grade", "Consistency"]),
+                use_container_width=True, hide_index=True,
+            )
             st.markdown("### Top current grades")
-            st.dataframe(latest.sort_values("Current Grade", ascending=False).head(15).style.format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}, na_rep="-"), use_container_width=True, hide_index=True)
+            st.dataframe(
+                latest.sort_values("Current Grade", ascending=False).head(15).style
+                .format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}, na_rep="-")
+                .applymap(_stoplight_grade, subset=["Current Grade", "Consistency"])
+                .applymap(lambda v: "background-color: #fef9c3; color: #713f12" if v == "Heating Up" else ("background-color: #fee2e2; color: #991b1b" if v == "Cooling Off" else ""), subset=["trendFlag"]),
+                use_container_width=True, hide_index=True,
+            )
 
 with heat_tab:
+    st.markdown("### Shot location heat maps")
+    if not shot_events_view.empty:
+        sf_col, sa_col = st.columns(2)
+        oilers_shots = shot_events_view[shot_events_view["isOilersShot"]]
+        opp_shots = shot_events_view[~shot_events_view["isOilersShot"]]
+        with sf_col:
+            if not oilers_shots.empty:
+                st.plotly_chart(plot_rink_heatmap(oilers_shots, "Oilers Shots Taken"), use_container_width=True)
+        with sa_col:
+            if not opp_shots.empty:
+                st.plotly_chart(plot_rink_heatmap(opp_shots, "Shots Against Oilers"), use_container_width=True)
+    else:
+        st.info("No shot coordinate data available for the selected filters.")
+
     st.markdown("### Goal location heat maps")
     st.caption("Team maps use goal event coordinates. On-ice player maps are best-effort approximations based on event payload player IDs when available.")
 
@@ -797,12 +966,12 @@ with outlook_tab:
     left, right = st.columns([1.2, 1])
     with left:
         if not team_games.empty:
-            pts_path = team_games[["gameDate", "cumulativePoints"]]
+            pts_path = team_games[["gameDate", "cumulativePoints"]].copy()
             pts_path["paceLine82"] = np.linspace(0, outlook["projected_points"], len(pts_path))
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=pts_path["gameDate"], y=pts_path["cumulativePoints"], mode="lines+markers", name="Actual"))
-            fig.add_trace(go.Scatter(x=pts_path["gameDate"], y=pts_path["paceLine82"], mode="lines", name="Projected pace", line=dict(dash="dash")))
-            fig.update_layout(template="plotly_white", height=380, title="Points Path", margin=dict(l=20, r=20, t=50, b=10))
+            fig.add_trace(go.Scatter(x=pts_path["gameDate"], y=pts_path["cumulativePoints"], mode="lines+markers", name="Actual", line={**_SPLINE, "color": "#3b82f6", "width": 2.5}, marker=dict(size=6)))
+            fig.add_trace(go.Scatter(x=pts_path["gameDate"], y=pts_path["paceLine82"], mode="lines", name="Projected pace", line=dict(dash="dash", color="#94a3b8", width=1.5)))
+            fig.update_layout(**_CHART_LAYOUT, height=380, title="Points Path")
             st.plotly_chart(fig, use_container_width=True)
     with right:
         st.markdown("### Stretch-run context")
@@ -821,10 +990,44 @@ with outlook_tab:
             st.dataframe(rem[["gameDate", "homeTeam", "awayTeam", "opponent"]].rename(columns={"gameDate": "Date"}), use_container_width=True, hide_index=True)
 
 with games_tab:
+    st.markdown("### Full season schedule")
+    if not schedule.empty:
+        opp_col = np.where(schedule["homeTeam"] == TEAM_TRI, schedule["awayTeam"], schedule["homeTeam"])
+        venue_col = np.where(schedule["homeTeam"] == TEAM_TRI, "Home", "Away")
+        team_score_col = np.where(schedule["homeTeam"] == TEAM_TRI, schedule["homeScore"], schedule["awayScore"])
+        opp_score_col = np.where(schedule["homeTeam"] == TEAM_TRI, schedule["awayScore"], schedule["homeScore"])
+        result_col = np.where(
+            ~schedule["isCompleted"], "Upcoming",
+            np.where(team_score_col > opp_score_col, "W", np.where(team_score_col == opp_score_col, "OTL", "L")),
+        )
+        full_sched = pd.DataFrame({
+            "Date": schedule["gameDate"].dt.strftime("%b %d"),
+            "Venue": venue_col,
+            "Opponent": opp_col,
+            "Score": np.where(schedule["isCompleted"], team_score_col.astype(str) + "–" + opp_score_col.astype(str), "—"),
+            "Result": result_col,
+        })
+        st.dataframe(
+            full_sched.style.applymap(_stoplight_result, subset=["Result"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
     st.markdown("### Team game log")
     if not team_games.empty:
-        st.dataframe(team_games.style.format({"teamFaceoffPct": "{:.1f}", "rolling3GoalDiff": "{:.2f}", "rolling3ShotDiff": "{:.2f}", "momentumScore": "{:.1f}"}, na_rep="-"), use_container_width=True, hide_index=True)
+        st.dataframe(
+            team_games.style
+            .format({"teamFaceoffPct": "{:.1f}", "rolling3GoalDiff": "{:.2f}", "rolling3ShotDiff": "{:.2f}", "momentumScore": "{:.1f}"}, na_rep="-")
+            .applymap(_stoplight_result, subset=["result"])
+            .applymap(_stoplight_momentum, subset=["momentumScore"]),
+            use_container_width=True, hide_index=True,
+        )
     st.markdown("### Player game log")
     if not player_games.empty:
         pview = player_games[player_games["playerName"] == player_selected]
-        st.dataframe(pview[["gameDate", "goals", "assists", "points", "shots", "toi_min", "gameGrade", "rollingGrade", "trendFlag"]].style.format({"toi_min": "{:.1f}", "gameGrade": "{:.1f}", "rollingGrade": "{:.1f}"}, na_rep="-"), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pview[["gameDate", "goals", "assists", "points", "shots", "toi_min", "gameGrade", "rollingGrade", "trendFlag"]]
+            .style.format({"toi_min": "{:.1f}", "gameGrade": "{:.1f}", "rollingGrade": "{:.1f}"}, na_rep="-")
+            .applymap(_stoplight_grade, subset=["gameGrade", "rollingGrade"]),
+            use_container_width=True, hide_index=True,
+        )
