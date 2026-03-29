@@ -723,7 +723,7 @@ with team_tab:
             - 0.20 * zscore(opp_profile["avgGoalDiff"]).fillna(0)
         ) * 10 + 50
         st.dataframe(
-            opp_profile.sort_values("damageIndex", ascending=False).style.format({"avgGoalDiff": "{:.2f}", "avgShotsAgainst": "{:.1f}", "damageIndex": "{:.1f}"}),
+            opp_profile.sort_values("damageIndex", ascending=False).style.format({"avgGoalDiff": "{:.2f}", "avgShotsAgainst": "{:.1f}", "damageIndex": "{:.1f}"}, na_rep="-"),
             use_container_width=True,
             hide_index=True,
         )
@@ -740,9 +740,9 @@ with player_tab:
         with bottom:
             selected_latest = latest[latest["playerName"] == player_selected]
             st.markdown("### Player snapshot")
-            st.dataframe(selected_latest.style.format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}), use_container_width=True, hide_index=True)
+            st.dataframe(selected_latest.style.format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}, na_rep="-"), use_container_width=True, hide_index=True)
             st.markdown("### Top current grades")
-            st.dataframe(latest.sort_values("Current Grade", ascending=False).head(15).style.format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}), use_container_width=True, hide_index=True)
+            st.dataframe(latest.sort_values("Current Grade", ascending=False).head(15).style.format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}, na_rep="-"), use_container_width=True, hide_index=True)
 
 with heat_tab:
     st.markdown("### Goal location heat maps")
@@ -823,8 +823,8 @@ with outlook_tab:
 with games_tab:
     st.markdown("### Team game log")
     if not team_games.empty:
-        st.dataframe(team_games.style.format({"teamFaceoffPct": "{:.1f}", "rolling3GoalDiff": "{:.2f}", "rolling3ShotDiff": "{:.2f}", "momentumScore": "{:.1f}"}), use_container_width=True, hide_index=True)
+        st.dataframe(team_games.style.format({"teamFaceoffPct": "{:.1f}", "rolling3GoalDiff": "{:.2f}", "rolling3ShotDiff": "{:.2f}", "momentumScore": "{:.1f}"}, na_rep="-"), use_container_width=True, hide_index=True)
     st.markdown("### Player game log")
     if not player_games.empty:
         pview = player_games[player_games["playerName"] == player_selected]
-        st.dataframe(pview[["gameDate", "goals", "assists", "points", "shots", "toi_min", "gameGrade", "rollingGrade", "trendFlag"]].style.format({"toi_min": "{:.1f}", "gameGrade": "{:.1f}", "rollingGrade": "{:.1f}"}), use_container_width=True, hide_index=True)
+        st.dataframe(pview[["gameDate", "goals", "assists", "points", "shots", "toi_min", "gameGrade", "rollingGrade", "trendFlag"]].style.format({"toi_min": "{:.1f}", "gameGrade": "{:.1f}", "rollingGrade": "{:.1f}"}, na_rep="-"), use_container_width=True, hide_index=True)
