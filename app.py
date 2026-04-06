@@ -1,1033 +1,749 @@
-from typing import Any, Dict, List, Tuple
+"""NHL Analytics Dashboard — Production-ready, data-first Streamlit application.
+
+Entry point that orchestrates data loading, feature engineering, models,
+simulations, and UI rendering through the modular architecture.
+"""
+
+from __future__ import annotations
+
+from typing import Any
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
-import requests
 import streamlit as st
 
-BASE = "https://api-web.nhle.com/v1"
-TEAM_TRI = "EDM"
-TEAM_NAME = "Edmonton Oilers"
-SEASON = "20252026"
-TIMEOUT = 30
+from config.settings import (
+    DEFAULT_TEAM,
+    DEFAULT_TEAM_NAME,
+    MC_SIMULATIONS,
+    SEASON,
+    TOTAL_GAMES,
+)
+from config.teams import CONFERENCES, DIVISIONS, TEAMS, TEAM_LOGOS
+from data.loader import LeagueDataLoader
+from features.momentum import compute_momentum
+from features.player_ratings import compute_player_ratings
+from features.team_features import compute_team_features
+from models.playoff_model import PlayoffModel
+from models.projections import project_opponents, project_seeds
+from providers.nhl_api import NHLApiProvider
+from simulations.game_sim import simulate_game
+from simulations.season_sim import simulate_season
+from ui.charts import (
+    plot_game_sim_histogram,
+    plot_impact_chart,
+    plot_momentum,
+    plot_player_progress,
+    plot_points_path,
+    plot_rink_heatmap,
+    plot_team_trend,
+)
+from ui.components import (
+    kpi_card,
+    render_kpi,
+    stoplight_for_value,
+    team_logo_html,
+    team_logo_with_name,
+)
+from ui.styles import DASHBOARD_CSS
+from utils.helpers import format_record, zscore
+from utils.stoplight import sl_grade, sl_momentum, sl_odds, sl_result, sl_damage
 
+# ────────────────────────────────────────────────────────────────
+# Page config
+# ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Oilers Trends Dashboard",
+    page_title="NHL Analytics Dashboard",
     page_icon="🏒",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+st.markdown(DASHBOARD_CSS, unsafe_allow_html=True)
 
+# ────────────────────────────────────────────────────────────────
+# Helpers
+# ────────────────────────────────────────────────────────────────
+ALL_TEAM_OPTIONS = sorted(TEAMS.keys())
 
-# ---------- Styling ----------
-st.markdown(
-    """
-    <style>
-    .block-container {
-        padding-top: 1.2rem;
-        padding-bottom: 2rem;
-        max-width: 1450px;
-    }
-    .kpi-card {
-        background: #ffffff;
-        border: 1px solid rgba(15,23,42,.08);
-        border-radius: 16px;
-        padding: 16px 18px;
-        box-shadow: 0 8px 24px rgba(15,23,42,.05);
-        min-height: 110px;
-    }
-    .kpi-label {
-        color: #64748b;
-        font-size: 0.88rem;
-        margin-bottom: .35rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: .03em;
-    }
-    .kpi-value {
-        color: #0f172a;
-        font-size: 2rem;
-        font-weight: 800;
-        line-height: 1.1;
-    }
-    .kpi-sub {
-        color: #475569;
-        font-size: 0.92rem;
-        margin-top: .25rem;
-    }
-    .panel {
-        background: #ffffff;
-        border: 1px solid rgba(15,23,42,.08);
-        border-radius: 18px;
-        padding: 14px 16px 6px 16px;
-        box-shadow: 0 8px 24px rgba(15,23,42,.05);
-    }
-    .section-title {
-        font-size: 1.25rem;
-        font-weight: 800;
-        color: #0f172a;
-        margin: 0 0 .45rem 0;
-    }
-    .muted {
-        color: #64748b;
-        font-size: 0.95rem;
-    }
-    div[data-testid="stHorizontalBlock"] > div {
-        overflow: visible !important;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: .5rem;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 44px;
-        border-radius: 12px;
-        padding-left: 14px;
-        padding-right: 14px;
-        background: #f8fafc;
-        border: 1px solid rgba(15,23,42,.06);
-    }
-    .stTabs [aria-selected="true"] {
-        background: #eff6ff !important;
-        border: 1px solid rgba(37,99,235,.18) !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
+def _logo_col(abbrev: str, size: int = 24) -> str:
+    return team_logo_html(abbrev, size)
 
-# ---------- Utils ----------
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_json(url: str) -> Dict[str, Any]:
-    r = requests.get(url, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
 
+def _detect_season_state(standings: pd.DataFrame, schedule: pd.DataFrame, focus: str) -> str:
+    """Detect: regular_season | bracket_locked | active_playoff."""
+    if schedule.empty:
+        return "regular_season"
+    playoff_games = schedule[schedule["gameType"] == 3]
+    if not playoff_games.empty:
+        if playoff_games["isCompleted"].any():
+            return "active_playoff"
+        return "bracket_locked"
+    return "regular_season"
 
-def safe_get(obj: Any, path: List[Any], default=None):
-    cur = obj
-    try:
-        for p in path:
-            cur = cur[p]
-        return cur
-    except Exception:
-        return default
 
+def _edm_eliminated(standings: pd.DataFrame, season_sim: dict) -> bool:
+    """Check if Edmonton is mathematically eliminated."""
+    if not season_sim:
+        return False
+    edm_sim = season_sim.get(DEFAULT_TEAM, {})
+    return edm_sim.get("makePlayoffsPct", 50) < 1
 
-def flatten_dict(obj: Any, parent_key: str = "", sep: str = ".") -> Dict[str, Any]:
-    items: Dict[str, Any] = {}
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            new_key = f"{parent_key}{sep}{k}" if parent_key else str(k)
-            items.update(flatten_dict(v, new_key, sep))
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            new_key = f"{parent_key}{sep}{i}" if parent_key else str(i)
-            items.update(flatten_dict(v, new_key, sep))
-    else:
-        items[parent_key] = obj
-    return items
 
+# ────────────────────────────────────────────────────────────────
+# Data load
+# ────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600, show_spinner="Loading league data…")
+def _load_league_data(focus_team: str) -> dict[str, Any]:
+    loader = LeagueDataLoader(focus_team)
+    return loader.load_all()
 
-def first_non_null(d: Dict[str, Any], keys: List[str], default=None):
-    for k in keys:
-        if k in d and d[k] is not None:
-            return d[k]
-    return default
 
+# Determine focus team
+focus_team = st.session_state.get("focus_team", DEFAULT_TEAM)
 
-def parse_mmss(val: Any) -> float:
-    if val is None or (isinstance(val, float) and np.isnan(val)):
-        return np.nan
-    if isinstance(val, (int, float)):
-        return float(val)
-    s = str(val)
-    if ":" in s:
-        try:
-            mm, ss = s.split(":")
-            return int(mm) + int(ss) / 60
-        except Exception:
-            return np.nan
-    try:
-        return float(s)
-    except Exception:
-        return np.nan
-
-
-def format_record(team_games: pd.DataFrame) -> str:
-    wins = int((team_games["result"] == "W").sum())
-    losses = int((team_games["result"] == "L").sum())
-    otl = int((team_games["result"] == "OTL").sum()) if "OTL" in team_games["result"].values else 0
-    return f"{wins}-{losses}" if otl == 0 else f"{wins}-{losses}-{otl}"
-
-
-def points_from_result(row: pd.Series) -> int:
-    if row["result"] == "W":
-        return 2
-    if row["result"] == "OTL":
-        return 1
-    return 0
-
-
-def zscore(series: pd.Series) -> pd.Series:
-    s = pd.to_numeric(series, errors="coerce")
-    std = s.std(ddof=0)
-    if std == 0 or np.isnan(std):
-        return pd.Series(np.zeros(len(s)), index=s.index)
-    return (s - s.mean()) / std
-
-
-def _stoplight_grade(val: float) -> str:
-    if pd.isna(val):
-        return ""
-    if val >= 70:
-        return "background-color: #dcfce7; color: #166534"
-    if val >= 50:
-        return "background-color: #fef9c3; color: #713f12"
-    return "background-color: #fee2e2; color: #991b1b"
-
-
-def _stoplight_momentum(val: float) -> str:
-    if pd.isna(val):
-        return ""
-    if val > 55:
-        return "background-color: #dcfce7; color: #166534"
-    if val >= 45:
-        return "background-color: #fef9c3; color: #713f12"
-    return "background-color: #fee2e2; color: #991b1b"
-
-
-def _stoplight_damage(val: float) -> str:
-    if pd.isna(val):
-        return ""
-    if val > 60:
-        return "background-color: #fee2e2; color: #991b1b"
-    if val >= 45:
-        return "background-color: #fef9c3; color: #713f12"
-    return "background-color: #dcfce7; color: #166534"
-
-
-def _stoplight_result(val: str) -> str:
-    if val == "W":
-        return "background-color: #dcfce7; color: #166534"
-    if val == "OTL":
-        return "background-color: #fef9c3; color: #713f12"
-    if val == "L":
-        return "background-color: #fee2e2; color: #991b1b"
-    return ""
-
-
-def classify_zone(x: float, y: float) -> str:
-    if pd.isna(x) or pd.isna(y):
-        return "Unknown"
-    ax = abs(x)
-    ay = abs(y)
-    if ax <= 20 and ay <= 10:
-        return "Net Front"
-    if ax <= 35 and ay <= 20:
-        return "Slot"
-    if ax <= 69 and ay <= 22:
-        return "Circle / Inner Lane"
-    if ax <= 89 and ay <= 42:
-        return "Perimeter"
-    return "Outer / Point"
-
-
-def opponent_from_row(row: pd.Series) -> str:
-    return row["awayTeam"] if row["homeTeam"] == TEAM_TRI else row["homeTeam"]
-
-
-def draw_rink(fig: go.Figure):
-    # Simplified offensive/defensive rink overlay
-    fig.update_xaxes(range=[-100, 100], showgrid=False, zeroline=False, visible=False)
-    fig.update_yaxes(range=[-42.5, 42.5], showgrid=False, zeroline=False, visible=False, scaleanchor="x", scaleratio=1)
-    shapes = [
-        dict(type="rect", x0=-89, x1=89, y0=-42.5, y1=42.5, line=dict(color="#cbd5e1", width=2)),
-        dict(type="line", x0=0, x1=0, y0=-42.5, y1=42.5, line=dict(color="#e2e8f0", width=2)),
-        dict(type="line", x0=-25, x1=-25, y0=-42.5, y1=42.5, line=dict(color="#e2e8f0", width=1)),
-        dict(type="line", x0=25, x1=25, y0=-42.5, y1=42.5, line=dict(color="#e2e8f0", width=1)),
-        dict(type="circle", x0=-22, x1=22, y0=-22, y1=22, line=dict(color="#e2e8f0", width=1)),
-    ]
-    fig.update_layout(shapes=shapes, plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", margin=dict(l=0, r=0, t=40, b=0))
-
-
-# ---------- Data Pull ----------
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_schedule(team: str = TEAM_TRI, season: str = SEASON) -> pd.DataFrame:
-    data = get_json(f"{BASE}/club-schedule-season/{team}/{season}")
-    games: List[Dict[str, Any]] = []
-    containers = []
-    if isinstance(data, dict):
-        if isinstance(data.get("games"), list):
-            containers.append(data["games"])
-        if isinstance(data.get("gameWeek"), list):
-            for wk in data["gameWeek"]:
-                if isinstance(wk, dict) and isinstance(wk.get("games"), list):
-                    containers.append(wk["games"])
-    for game_list in containers:
-        for g in game_list:
-            flat = flatten_dict(g)
-            game_id = first_non_null(flat, ["id", "gameId"])
-            game_date = first_non_null(flat, ["gameDate", "startTimeUTC", "startTime"])
-            away = first_non_null(flat, ["awayTeam.abbrev"])
-            home = first_non_null(flat, ["homeTeam.abbrev"])
-            away_score = first_non_null(flat, ["awayTeam.score", "awayScore"])
-            home_score = first_non_null(flat, ["homeTeam.score", "homeScore"])
-            game_state = str(first_non_null(flat, ["gameState", "gameScheduleState"], "")).upper()
-            game_type = first_non_null(flat, ["gameType"])
-            if game_id:
-                games.append(
-                    {
-                        "gameId": int(game_id),
-                        "gameDate": pd.to_datetime(game_date, errors="coerce"),
-                        "awayTeam": away,
-                        "homeTeam": home,
-                        "awayScore": away_score,
-                        "homeScore": home_score,
-                        "gameState": game_state,
-                        "gameType": game_type,
-                        "isCompleted": game_state in {"OFF", "FINAL", "OVER", "DONE"} or (away_score is not None and home_score is not None),
-                    }
-                )
-    df = pd.DataFrame(games).drop_duplicates(subset=["gameId"])
-    if df.empty:
-        return df
-    df = df.sort_values(["gameDate", "gameId"]).reset_index(drop=True)
-    return df
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_standings() -> pd.DataFrame:
-    data = get_json(f"{BASE}/standings/now")
-    raw = data.get("standings", data if isinstance(data, list) else [])
-    rows = []
-    for team in raw:
-        flat = flatten_dict(team)
-        rows.append(
-            {
-                "teamName": first_non_null(flat, ["teamName.default", "teamCommonName.default", "teamAbbrev.default", "teamName"]),
-                "teamAbbrev": first_non_null(flat, ["teamAbbrev.default", "teamAbbrev", "abbrev"]),
-                "conference": first_non_null(flat, ["conferenceName", "conferenceAbbrev"]),
-                "division": first_non_null(flat, ["divisionName", "divisionAbbrev"]),
-                "gamesPlayed": first_non_null(flat, ["gamesPlayed"]),
-                "points": first_non_null(flat, ["points"]),
-                "goalDifferential": first_non_null(flat, ["goalDifferential"]),
-                "wins": first_non_null(flat, ["wins"]),
-                "losses": first_non_null(flat, ["losses"]),
-                "otLosses": first_non_null(flat, ["otLosses"]),
-                "pointPctg": first_non_null(flat, ["pointPctg", "pointsPctg"]),
-                "conferenceSequence": first_non_null(flat, ["conferenceSequence"]),
-                "wildcardSequence": first_non_null(flat, ["wildcardSequence"]),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_roster(team: str = TEAM_TRI, season: str = SEASON) -> pd.DataFrame:
-    data = get_json(f"{BASE}/roster/{team}/{season}")
-    rows = []
-    mapping = {
-        "forwards": "F",
-        "defensemen": "D",
-        "goalies": "G",
-        "skaters": "S",
-    }
-    for sec, pos in mapping.items():
-        for p in data.get(sec, []) or []:
-            rows.append(
-                {
-                    "playerId": p.get("id") or p.get("playerId"),
-                    "playerName": " ".join(
-                        x for x in [safe_get(p, ["firstName", "default"]), safe_get(p, ["lastName", "default"])] if x
-                    ).strip(),
-                    "position": pos,
-                    "sweaterNumber": p.get("sweaterNumber"),
-                }
-            )
-    return pd.DataFrame(rows).drop_duplicates(subset=["playerId", "playerName"])
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_boxscore(game_id: int) -> Dict[str, Any]:
-    return get_json(f"{BASE}/gamecenter/{game_id}/boxscore")
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_play_by_play(game_id: int) -> Dict[str, Any]:
-    return get_json(f"{BASE}/gamecenter/{game_id}/play-by-play")
-
-
-def extract_team_game(game_row: pd.Series, box: Dict[str, Any]) -> Dict[str, Any]:
-    flat = flatten_dict(box)
-    away_score = first_non_null(flat, ["awayTeam.score"], game_row["awayScore"])
-    home_score = first_non_null(flat, ["homeTeam.score"], game_row["homeScore"])
-    away_shots = first_non_null(flat, ["awayTeam.sog", "awayTeam.shotsOnGoal", "awayTeam.teamStats.shotsOnGoal"])
-    home_shots = first_non_null(flat, ["homeTeam.sog", "homeTeam.shotsOnGoal", "homeTeam.teamStats.shotsOnGoal"])
-    away_faceoff = first_non_null(flat, ["awayTeam.faceoffWinningPctg", "awayTeam.teamStats.faceoffWinningPctg"])
-    home_faceoff = first_non_null(flat, ["homeTeam.faceoffWinningPctg", "homeTeam.teamStats.faceoffWinningPctg"])
-    away_pp = first_non_null(flat, ["awayTeam.powerPlayConversion", "awayTeam.teamStats.powerPlayConversion"])
-    home_pp = first_non_null(flat, ["homeTeam.powerPlayConversion", "homeTeam.teamStats.powerPlayConversion"])
-
-    is_home = game_row["homeTeam"] == TEAM_TRI
-    team_score = home_score if is_home else away_score
-    opp_score = away_score if is_home else home_score
-    result = "W" if team_score > opp_score else "L"
-
-    return {
-        "gameId": int(game_row["gameId"]),
-        "gameDate": game_row["gameDate"],
-        "gameType": game_row["gameType"],
-        "venue": "Home" if is_home else "Away",
-        "opponent": opponent_from_row(game_row),
-        "teamScore": team_score,
-        "oppScore": opp_score,
-        "result": result,
-        "goalDiff": (team_score or 0) - (opp_score or 0),
-        "teamShots": home_shots if is_home else away_shots,
-        "oppShots": away_shots if is_home else home_shots,
-        "shotDiff": (home_shots - away_shots) if (is_home and home_shots is not None and away_shots is not None) else ((away_shots - home_shots) if (not is_home and away_shots is not None and home_shots is not None) else np.nan),
-        "teamFaceoffPct": home_faceoff if is_home else away_faceoff,
-        "teamPowerPlay": home_pp if is_home else away_pp,
-    }
-
-
-def get_player_arrays(box: Dict[str, Any]) -> List[Tuple[str, List[Dict[str, Any]]]]:
-    out: List[Tuple[str, List[Dict[str, Any]]]] = []
-    pbg = box.get("playerByGameStats", {}) if isinstance(box, dict) else {}
-    for side in ["awayTeam", "homeTeam"]:
-        for group in ["forwards", "defense", "goalies"]:
-            arr = safe_get(pbg, [side, group], [])
-            if isinstance(arr, list) and arr:
-                out.append((side, arr))
-    return out
-
-
-def extract_player_games(game_row: pd.Series, box: Dict[str, Any], roster_df: pd.DataFrame) -> pd.DataFrame:
-    roster_ids = set(roster_df["playerId"].dropna().astype(int).tolist()) if not roster_df.empty else set()
-    roster_names = set(roster_df["playerName"].dropna().tolist()) if not roster_df.empty else set()
-    rows = []
-    for side, arr in get_player_arrays(box):
-        team_abbrev = game_row["awayTeam"] if side == "awayTeam" else game_row["homeTeam"]
-        for p in arr:
-            flat = flatten_dict(p)
-            pid = first_non_null(flat, ["playerId", "id"])
-            fn = first_non_null(flat, ["firstName.default", "firstName"])
-            ln = first_non_null(flat, ["lastName.default", "lastName"])
-            name = first_non_null(flat, ["name.default", "fullName"], " ".join(x for x in [fn, ln] if x).strip())
-            if team_abbrev != TEAM_TRI and pid not in roster_ids and name not in roster_names:
-                continue
-            rows.append(
-                {
-                    "gameId": int(game_row["gameId"]),
-                    "gameDate": game_row["gameDate"],
-                    "playerId": pid,
-                    "playerName": name,
-                    "position": first_non_null(flat, ["position", "positionCode"]),
-                    "goals": first_non_null(flat, ["goals", "g"], 0),
-                    "assists": first_non_null(flat, ["assists", "a"], 0),
-                    "points": first_non_null(flat, ["points", "p"], 0),
-                    "plusMinus": first_non_null(flat, ["plusMinus"], 0),
-                    "shots": first_non_null(flat, ["shots", "sog"], 0),
-                    "hits": first_non_null(flat, ["hits"], 0),
-                    "blockedShots": first_non_null(flat, ["blockedShots", "blocks"], 0),
-                    "giveaways": first_non_null(flat, ["giveaways"], 0),
-                    "takeaways": first_non_null(flat, ["takeaways"], 0),
-                    "faceoffWins": first_non_null(flat, ["faceoffWins", "faceoffsWon"], 0),
-                    "faceoffTaken": first_non_null(flat, ["faceoffTaken", "faceoffs"], 0),
-                    "toi": first_non_null(flat, ["toi", "timeOnIce"]),
-                    "ppToi": first_non_null(flat, ["powerPlayToi", "ppToi"]),
-                    "shToi": first_non_null(flat, ["shorthandedToi", "shToi"]),
-                    "evToi": first_non_null(flat, ["evenStrengthToi", "evToi"]),
-                    "saves": first_non_null(flat, ["saves"]),
-                    "goalsAgainst": first_non_null(flat, ["goalsAgainst"]),
-                    "shotsAgainst": first_non_null(flat, ["shotsAgainst"]),
-                }
-            )
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    for col in ["goals", "assists", "points", "plusMinus", "shots", "hits", "blockedShots", "giveaways", "takeaways", "faceoffWins", "faceoffTaken", "saves", "goalsAgainst", "shotsAgainst"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    for col in ["toi", "ppToi", "shToi", "evToi"]:
-        df[f"{col}_min"] = df[col].apply(parse_mmss)
-    return df
-
-
-def extract_goal_events(schedule_df: pd.DataFrame, roster_df: pd.DataFrame) -> pd.DataFrame:
-    roster_ids = set(roster_df["playerId"].dropna().astype(int).tolist()) if not roster_df.empty else set()
-    events_out: List[Dict[str, Any]] = []
-    completed = schedule_df[schedule_df["isCompleted"]]
-    for _, g in completed.iterrows():
-        try:
-            pbp = get_play_by_play(int(g["gameId"]))
-        except Exception:
-            continue
-        plays = pbp.get("plays", pbp.get("gameEvents", [])) if isinstance(pbp, dict) else []
-        if not isinstance(plays, list):
-            continue
-        for ev in plays:
-            flat = flatten_dict(ev)
-            event_type = str(first_non_null(flat, ["typeDescKey", "eventType", "typeCode"], "")).lower()
-            if "goal" not in event_type:
-                continue
-            x = first_non_null(flat, ["details.xCoord", "xCoord", "x"])
-            y = first_non_null(flat, ["details.yCoord", "yCoord", "y"])
-            scoring_team = first_non_null(flat, ["details.eventOwnerTeamAbbrev", "teamAbbrev"])
-            strength = first_non_null(flat, ["details.strength", "situationCode", "details.situationCode"])
-            period = first_non_null(flat, ["periodDescriptor.number", "period"])
-            scorer_id = first_non_null(flat, ["details.scoringPlayerId", "details.playerId"])
-            on_ice_for = first_non_null(flat, ["details.homeTeamDefendingSide", "details.zoneCode"])
-
-            home_team = g["homeTeam"]
-            away_team = g["awayTeam"]
-            is_oilers_goal = scoring_team == TEAM_TRI
-
-            # Capture any player ids listed on event payload as a fallback approximation for on-ice linking
-            event_player_ids = set()
-            for key, val in flat.items():
-                if isinstance(val, int) and ("playerId" in key or key.endswith(".id")):
-                    event_player_ids.add(val)
-            oilers_on_event = bool(roster_ids.intersection(event_player_ids))
-            nx = pd.to_numeric(x, errors="coerce")
-            ny = pd.to_numeric(y, errors="coerce")
-
-            events_out.append(
-                {
-                    "gameId": int(g["gameId"]),
-                    "gameDate": g["gameDate"],
-                    "opponent": opponent_from_row(g),
-                    "venue": "Home" if g["homeTeam"] == TEAM_TRI else "Away",
-                    "period": period,
-                    "x": nx,
-                    "y": ny,
-                    "teamFor": scoring_team,
-                    "isOilersGoal": is_oilers_goal,
-                    "strength": str(strength),
-                    "scorerId": scorer_id,
-                    "zone": classify_zone(nx, ny),
-                    "eventHasOilersPlayerId": oilers_on_event,
-                    "homeTeam": home_team,
-                    "awayTeam": away_team,
-                    "rawSideHint": on_ice_for,
-                }
-            )
-    return pd.DataFrame(events_out)
-
-
-def extract_shot_events(schedule_df: pd.DataFrame, roster_df: pd.DataFrame) -> pd.DataFrame:
-    events_out: List[Dict[str, Any]] = []
-    completed = schedule_df[schedule_df["isCompleted"]]
-    for _, g in completed.iterrows():
-        try:
-            pbp = get_play_by_play(int(g["gameId"]))
-        except Exception:
-            continue
-        plays = pbp.get("plays", pbp.get("gameEvents", [])) if isinstance(pbp, dict) else []
-        if not isinstance(plays, list):
-            continue
-        for ev in plays:
-            flat = flatten_dict(ev)
-            event_type = str(first_non_null(flat, ["typeDescKey", "eventType", "typeCode"], "")).lower()
-            if not any(t in event_type for t in ["shot", "goal", "miss"]):
-                continue
-            x = first_non_null(flat, ["details.xCoord", "xCoord", "x"])
-            y = first_non_null(flat, ["details.yCoord", "yCoord", "y"])
-            shooting_team = first_non_null(flat, ["details.eventOwnerTeamAbbrev", "teamAbbrev"])
-            strength = first_non_null(flat, ["details.strength", "situationCode", "details.situationCode"])
-            nx = pd.to_numeric(x, errors="coerce")
-            ny = pd.to_numeric(y, errors="coerce")
-            events_out.append(
-                {
-                    "gameId": int(g["gameId"]),
-                    "gameDate": g["gameDate"],
-                    "venue": "Home" if g["homeTeam"] == TEAM_TRI else "Away",
-                    "x": nx,
-                    "y": ny,
-                    "isOilersShot": shooting_team == TEAM_TRI,
-                    "strength": str(strength),
-                    "zone": classify_zone(nx, ny),
-                    "eventType": event_type,
-                }
-            )
-    return pd.DataFrame(events_out)
-
-
-@st.cache_data(ttl=3600, show_spinner=True)
-def build_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    schedule = get_schedule()
-    roster = get_roster()
-    completed = schedule[schedule["isCompleted"]]
-    team_rows = []
-    player_parts = []
-    for _, g in completed.iterrows():
-        try:
-            box = get_boxscore(int(g["gameId"]))
-            team_rows.append(extract_team_game(g, box))
-            pg = extract_player_games(g, box, roster)
-            if not pg.empty:
-                player_parts.append(pg)
-        except Exception:
-            continue
-    team_games = pd.DataFrame(team_rows).sort_values(["gameDate", "gameId"]).reset_index(drop=True)
-    player_games = pd.concat(player_parts, ignore_index=True) if player_parts else pd.DataFrame()
-    if not team_games.empty:
-        team_games["gameNumber"] = np.arange(1, len(team_games) + 1)
-        team_games["pointsEarned"] = team_games.apply(points_from_result, axis=1)
-        team_games["cumulativePoints"] = team_games["pointsEarned"].cumsum()
-        team_games["rolling3GoalDiff"] = team_games["goalDiff"].rolling(3, min_periods=1).mean()
-        team_games["rolling5GoalDiff"] = team_games["goalDiff"].rolling(5, min_periods=1).mean()
-        team_games["rolling3ShotDiff"] = team_games["shotDiff"].rolling(3, min_periods=1).mean()
-        team_games["rolling3GoalsFor"] = team_games["teamScore"].rolling(3, min_periods=1).mean()
-        team_games["rolling3GoalsAgainst"] = team_games["oppScore"].rolling(3, min_periods=1).mean()
-        team_games["clutchIndex"] = np.where((team_games["goalDiff"].abs() == 1) & (team_games["result"] == "W"), 1, np.where((team_games["goalDiff"].abs() == 1) & (team_games["result"] == "L"), -1, 0))
-        team_games["momentumScore"] = (
-            0.35 * zscore(team_games["rolling3GoalDiff"]).fillna(0)
-            + 0.25 * zscore(team_games["rolling3ShotDiff"]).fillna(0)
-            + 0.20 * zscore(team_games["rolling3GoalsFor"] - team_games["rolling3GoalsAgainst"]).fillna(0)
-            + 0.20 * zscore(team_games["clutchIndex"].rolling(5, min_periods=1).mean()).fillna(0)
-        ) * 10 + 50
-    if not player_games.empty:
-        player_games = player_games.sort_values(["playerName", "gameDate", "gameId"]).reset_index(drop=True)
-        player_games["gameNumberByPlayer"] = player_games.groupby("playerName").cumcount() + 1
-        player_games["rolling3Points"] = player_games.groupby("playerName")["points"].transform(lambda s: s.rolling(3, min_periods=1).mean())
-        player_games["rolling5Points"] = player_games.groupby("playerName")["points"].transform(lambda s: s.rolling(5, min_periods=1).mean())
-        player_games["rolling5Toi"] = player_games.groupby("playerName")["toi_min"].transform(lambda s: s.rolling(5, min_periods=1).mean())
-        player_games["shootingPct"] = np.where(player_games["shots"] > 0, player_games["goals"] / player_games["shots"], 0)
-        player_games["gamesPlayed"] = player_games.groupby("playerName")["gameId"].transform("count")
-        player_games["seasonAvgPoints"] = player_games.groupby("playerName")["points"].transform("mean")
-        player_games["recent5AvgPoints"] = player_games.groupby("playerName")["points"].transform(lambda s: s.rolling(5, min_periods=1).mean())
-        grade_raw = (
-            0.9 * player_games["goals"]
-            + 0.7 * player_games["assists"]
-            + 0.08 * player_games["shots"]
-            + 0.035 * player_games["toi_min"].fillna(0)
-            + 0.06 * player_games["takeaways"]
-            + 0.04 * player_games["hits"]
-            + 0.04 * player_games["blockedShots"]
-            - 0.05 * player_games["giveaways"]
-            + 0.08 * player_games["plusMinus"]
-        )
-        player_games["gameGrade"] = (50 + 12 * zscore(grade_raw)).clip(20, 99)
-        player_games["rollingGrade"] = player_games.groupby("playerName")["gameGrade"].transform(lambda s: s.rolling(5, min_periods=1).mean())
-        player_games["consistencyScore"] = player_games.groupby("playerName")["gameGrade"].transform(lambda s: 100 - s.rolling(10, min_periods=3).std().fillna(0) * 4).clip(40, 100)
-        player_games["trendFlag"] = np.select(
-            [player_games["recent5AvgPoints"] >= 1.2 * player_games["seasonAvgPoints"], player_games["recent5AvgPoints"] <= 0.8 * player_games["seasonAvgPoints"]],
-            ["Heating Up", "Cooling Off"],
-            default="Stable",
-        )
-    goal_events = extract_goal_events(schedule, roster)
-    shot_events = extract_shot_events(schedule, roster)
-    standings = get_standings()
-    return schedule, team_games, player_games, goal_events, standings, shot_events
-
-
-# ---------- Charts ----------
-_CHART_LAYOUT = dict(template="plotly_white", margin=dict(l=20, r=20, t=50, b=10))
-_SPLINE = dict(shape="spline", smoothing=1.2)
-
-
-def plot_team_trend(team_games: pd.DataFrame) -> go.Figure:
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=team_games["gameDate"], y=team_games["rolling3GoalDiff"],
-        mode="lines+markers", name="Rolling 3 Goal Diff",
-        line={**_SPLINE, "color": "#3b82f6", "width": 2.5},
-        marker=dict(size=6),
-    ))
-    fig.add_trace(go.Scatter(
-        x=team_games["gameDate"], y=team_games["rolling3ShotDiff"],
-        mode="lines+markers", name="Rolling 3 Shot Diff", yaxis="y2",
-        line={**_SPLINE, "color": "#f59e0b", "width": 2},
-        marker=dict(size=5),
-    ))
-    fig.add_hline(y=0, line_dash="dot", line_color="#cbd5e1", line_width=1)
-    fig.update_layout(
-        **_CHART_LAYOUT,
-        title="Recent Form Trend",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        yaxis=dict(title="Goal Diff"),
-        yaxis2=dict(title="Shot Diff", overlaying="y", side="right"),
-        height=420,
-    )
-    return fig
-
-
-def plot_momentum(team_games: pd.DataFrame) -> go.Figure:
-    ms = team_games["momentumScore"]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=team_games["gameDate"], y=ms,
-        mode="lines+markers",
-        line={**_SPLINE, "color": "#8b5cf6", "width": 2.5},
-        marker=dict(size=6, color=ms, colorscale=[[0, "#ef4444"], [0.45, "#ef4444"], [0.45, "#f59e0b"], [0.55, "#f59e0b"], [0.55, "#22c55e"], [1, "#22c55e"]], cmin=30, cmax=70, showscale=False),
-        fill="tozeroy",
-        fillcolor="rgba(139,92,246,0.07)",
-        name="Momentum",
-    ))
-    fig.add_hline(y=50, line_dash="dash", line_color="#94a3b8", line_width=1)
-    fig.add_hrect(y0=55, y1=100, fillcolor="#22c55e", opacity=0.04, line_width=0)
-    fig.add_hrect(y0=0, y1=45, fillcolor="#ef4444", opacity=0.04, line_width=0)
-    fig.update_layout(**_CHART_LAYOUT, title="Momentum Score", height=350)
-    return fig
-
-
-def plot_impact_chart(team_games: pd.DataFrame) -> go.Figure:
-    gd = team_games["goalDiff"]
-    colors = ["#22c55e" if v > 0 else "#ef4444" if v < 0 else "#f59e0b" for v in gd]
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=team_games["gameDate"], y=gd,
-        marker_color=colors, opacity=0.75, name="Goal Diff",
-        hovertemplate="<b>%{x|%b %d}</b><br>Goal diff: %{y}<extra></extra>",
-    ))
-    fig.add_trace(go.Scatter(
-        x=team_games["gameDate"], y=team_games["rolling3GoalDiff"],
-        mode="lines", name="3-Game Trend",
-        line={**_SPLINE, "color": "#1d4ed8", "width": 2.5},
-    ))
-    fig.add_hline(y=0, line_dash="dot", line_color="#94a3b8", line_width=1)
-    fig.update_layout(
-        **_CHART_LAYOUT,
-        title="Game Impact — Positive / Neutral / Negative",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        height=360,
-    )
-    return fig
-
-
-def plot_player_progress(player_games: pd.DataFrame, player_name: str) -> go.Figure:
-    df = player_games[player_games["playerName"] == player_name].copy()
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df["gameDate"], y=df["rollingGrade"],
-        mode="lines+markers", name="Rolling Grade",
-        line={**_SPLINE, "color": "#3b82f6", "width": 2.5},
-        marker=dict(size=6),
-    ))
-    fig.add_trace(go.Bar(x=df["gameDate"], y=df["points"], name="Points", opacity=0.3, marker_color="#6366f1"))
-    fig.add_hrect(y0=70, y1=100, fillcolor="#22c55e", opacity=0.05, line_width=0)
-    fig.add_hrect(y0=0, y1=50, fillcolor="#ef4444", opacity=0.05, line_width=0)
-    fig.update_layout(**_CHART_LAYOUT, height=420, title=f"{player_name} Progression")
-    return fig
-
-
-def plot_rink_heatmap(df: pd.DataFrame, title: str) -> go.Figure:
-    fig = px.density_heatmap(
-        df, x="x", y="y",
-        nbinsx=30, nbinsy=26,
-        color_continuous_scale="YlOrRd",
-        title=title,
-    )
-    draw_rink(fig)
-    fig.update_layout(height=500, coloraxis_colorbar_title="Events")
-    return fig
-
-
-# ---------- Outlook ----------
-def compute_outlook(team_games: pd.DataFrame, schedule: pd.DataFrame, standings: pd.DataFrame) -> Dict[str, Any]:
-    oilers = standings[standings["teamAbbrev"] == TEAM_TRI]
-    if oilers.empty:
-        current_points = int(team_games["pointsEarned"].sum()) if not team_games.empty else 0
-        games_played = len(team_games)
-        goal_diff = int(team_games["goalDiff"].sum()) if not team_games.empty else 0
-        conference_rank = None
-    else:
-        current_points = int(pd.to_numeric(oilers.iloc[0]["points"], errors="coerce"))
-        games_played = int(pd.to_numeric(oilers.iloc[0]["gamesPlayed"], errors="coerce"))
-        goal_diff = int(pd.to_numeric(oilers.iloc[0]["goalDifferential"], errors="coerce"))
-        conference_rank = pd.to_numeric(oilers.iloc[0].get("conferenceSequence"), errors="coerce")
-
-    remaining = max(82 - games_played, 0)
-    pts_pct = current_points / max(games_played * 2, 1)
-    projected_points = current_points + remaining * 2 * pts_pct
-
-    west = standings[standings["conference"].astype(str).str.contains("West", case=False, na=False)].copy()
-    if not west.empty:
-        west["points"] = pd.to_numeric(west["points"], errors="coerce")
-        west = west.sort_values("points", ascending=False)
-        cutoff = west.iloc[min(7, len(west)-1)]["points"] if len(west) >= 8 else west["points"].min()
-        gap = current_points - cutoff
-    else:
-        cutoff = np.nan
-        gap = np.nan
-
-    # Proxy odds, not official model
-    pace_component = max(min((projected_points - 90) / 18, 1), -1)
-    diff_component = max(min(goal_diff / 40, 1), -1)
-    gap_component = 0 if pd.isna(gap) else max(min(gap / 10, 1), -1)
-    odds = round(float(max(min(50 + 22 * pace_component + 14 * diff_component + 14 * gap_component, 99), 1)), 1)
-
-    return {
-        "current_points": current_points,
-        "games_played": games_played,
-        "remaining_games": remaining,
-        "projected_points": round(projected_points, 1),
-        "conference_rank": None if pd.isna(conference_rank) else int(conference_rank),
-        "west_cutoff_points": None if pd.isna(cutoff) else int(cutoff),
-        "gap_to_cutoff": None if pd.isna(gap) else int(gap),
-        "playoff_odds_proxy": odds,
-    }
-
-
-# ---------- App ----------
 try:
-    schedule, team_games, player_games, goal_events, standings, shot_events = build_data()
+    data = _load_league_data(focus_team)
 except Exception as e:
-    st.error(f"Data load failed: {e}")
+    st.error(f"⚠️ Data load failed: {e}")
     st.stop()
 
-remaining_games_df = schedule[~schedule["isCompleted"]].sort_values("gameDate")
-outlook = compute_outlook(team_games, schedule, standings)
+standings: pd.DataFrame = data["standings"]
+schedule: pd.DataFrame = data["schedule"]
+roster: pd.DataFrame = data["roster"]
+team_games: pd.DataFrame = data["team_games"]
+player_games: pd.DataFrame = data["player_games"]
+shot_events: pd.DataFrame = data["shot_events"]
+season_sim: dict = data["season_sim"]
+health = data["health"]
 
-st.title("Edmonton Oilers Trends Dashboard")
-st.caption("Lighter UI, streamlined navigation, team trends, player grades, heat maps, and season outlook.")
+# Season state detection
+season_state = _detect_season_state(standings, schedule, focus_team)
 
-# KPI row
-k1, k2, k3, k4, k5 = st.columns(5)
+# Edmonton elimination auto-shift
+if focus_team == DEFAULT_TEAM and _edm_eliminated(standings, season_sim):
+    st.info("🏒 Edmonton is projected eliminated — shifting focus to Western Conference playoff race.")
+    focus_team = DEFAULT_TEAM  # keep EDM but show Western race prominently
+
+# ────────────────────────────────────────────────────────────────
+# Header with logo
+# ────────────────────────────────────────────────────────────────
+team_info = TEAMS.get(focus_team, {})
+team_name = team_info.get("name", focus_team)
+logo_url = TEAM_LOGOS.get(focus_team, "")
+
+hdr1, hdr2 = st.columns([0.08, 0.92])
+with hdr1:
+    st.markdown(f'<img src="{logo_url}" width="64" height="64">', unsafe_allow_html=True)
+with hdr2:
+    st.title(f"NHL Analytics Dashboard — {team_name}")
+    st.caption(f"Season {SEASON[:4]}–{SEASON[4:]} | {season_state.replace('_', ' ').title()} | Data-driven hockey analytics")
+
+# ────────────────────────────────────────────────────────────────
+# Team selector (sidebar)
+# ────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### Team Selector")
+    selected_team = st.selectbox(
+        "Focus Team",
+        ALL_TEAM_OPTIONS,
+        index=ALL_TEAM_OPTIONS.index(focus_team) if focus_team in ALL_TEAM_OPTIONS else 0,
+        format_func=lambda x: f"{x} — {TEAMS.get(x, {}).get('name', x)}",
+    )
+    if selected_team != focus_team:
+        st.session_state["focus_team"] = selected_team
+        st.rerun()
+
+# ────────────────────────────────────────────────────────────────
+# KPI Row
+# ────────────────────────────────────────────────────────────────
+team_standing = standings[standings["teamAbbrev"] == focus_team]
+
+if not team_standing.empty:
+    ts = team_standing.iloc[0]
+    wins = int(ts.get("wins", 0))
+    losses = int(ts.get("losses", 0))
+    otl = int(ts.get("otLosses", 0))
+    pts = int(ts.get("points", 0))
+    gd = int(ts.get("goalDifferential", 0))
+    gp = int(ts.get("gamesPlayed", 0))
+    proj_pts = int(ts.get("projectedPoints", 0))
+    proj_rec = ts.get("projectedRecord", "—")
+    playoff_odds = float(ts.get("playoffOdds", 50))
+    conf_rank = ts.get("conferenceSequence", "—")
+    div_rank = ts.get("divisionSequence", "—")
+    proj_seed = int(ts.get("projectedSeed", 0))
+    proj_opp = ts.get("projectedOpponent", "—")
+    momentum_val = float(team_games["momentumScore"].iloc[-1]) if not team_games.empty and "momentumScore" in team_games.columns else 50.0
+else:
+    wins = losses = otl = pts = gd = gp = proj_pts = 0
+    proj_rec = "—"
+    playoff_odds = 50.0
+    conf_rank = div_rank = "—"
+    proj_seed = 0
+    proj_opp = "—"
+    momentum_val = 50.0
+
+# MC sim odds (if available)
+mc_odds = season_sim.get(focus_team, {}).get("makePlayoffsPct", playoff_odds)
+
+k1, k2, k3, k4, k5, k6 = st.columns(6)
 with k1:
-    st.markdown(f"<div class='kpi-card'><div class='kpi-label'>Record</div><div class='kpi-value'>{format_record(team_games)}</div><div class='kpi-sub'>{len(team_games)} games completed</div></div>", unsafe_allow_html=True)
+    render_kpi("Record", format_record(wins, losses, otl), f"{gp} GP | {pts} pts")
 with k2:
-    gd = int(team_games["goalDiff"].sum()) if not team_games.empty else 0
-    st.markdown(f"<div class='kpi-card'><div class='kpi-label'>Goal Differential</div><div class='kpi-value'>{gd:+d}</div><div class='kpi-sub'>Season to date</div></div>", unsafe_allow_html=True)
+    render_kpi("Goal Diff", f"{gd:+d}", "Season to date", stoplight_for_value(gd, 5, -5))
 with k3:
-    ms = team_games["momentumScore"].iloc[-1] if not team_games.empty else np.nan
-    st.markdown(f"<div class='kpi-card'><div class='kpi-label'>Momentum</div><div class='kpi-value'>{ms:.1f}</div><div class='kpi-sub'>Latest composite trend</div></div>", unsafe_allow_html=True)
+    render_kpi("Momentum", f"{momentum_val:.0f}", team_games["momentumDirection"].iloc[-1] if not team_games.empty and "momentumDirection" in team_games.columns else "—", stoplight_for_value(momentum_val, 55, 45))
 with k4:
-    st.markdown(f"<div class='kpi-card'><div class='kpi-label'>Projected Points</div><div class='kpi-value'>{outlook['projected_points']}</div><div class='kpi-sub'>Current pace</div></div>", unsafe_allow_html=True)
+    render_kpi("Projected Pts", str(proj_pts), f"Projected: {proj_rec}", stoplight_for_value(proj_pts, 95, 85))
 with k5:
-    st.markdown(f"<div class='kpi-card'><div class='kpi-label'>Playoff Odds Proxy</div><div class='kpi-value'>{outlook['playoff_odds_proxy']}%</div><div class='kpi-sub'>Pace + standings + goal diff</div></div>", unsafe_allow_html=True)
+    render_kpi("Playoff Odds", f"{mc_odds:.0f}%", f"Proj Seed: {proj_seed}", stoplight_for_value(mc_odds, 70, 40))
+with k6:
+    opp_logo = team_logo_html(str(proj_opp), 20) if proj_opp and proj_opp != "—" and proj_opp in TEAMS else ""
+    render_kpi("Proj Opponent", f"{opp_logo} {proj_opp}", f"Conf Rank: {conf_rank}")
 
-# Filters across top, no sidebar
+# ────────────────────────────────────────────────────────────────
+# Filters
+# ────────────────────────────────────────────────────────────────
 with st.container():
-    c1, c2, c3, c4 = st.columns([1.3, 1.2, 1.2, 1.4])
-    with c1:
-        window_choice = st.selectbox("Trend Window", [3, 5, 10], index=0)
-    with c2:
+    fc1, fc2, fc3, fc4 = st.columns([1.3, 1.2, 1.2, 1.4])
+    with fc1:
         venue_filter = st.selectbox("Venue", ["All", "Home", "Away"], index=0)
-    with c3:
-        strength_filter = st.selectbox("Heat Map Strength", ["All", "5v5", "PP", "SH"], index=0)
-    with c4:
+    with fc2:
+        strength_filter = st.selectbox("Strength", ["All", "5v5", "PP", "SH"], index=0)
+    with fc3:
+        window_choice = st.selectbox("Trend Window", [3, 5, 10], index=0)
+    with fc4:
         player_options = sorted(player_games["playerName"].dropna().unique().tolist()) if not player_games.empty else []
         default_player = "Connor McDavid" if "Connor McDavid" in player_options else (player_options[0] if player_options else None)
-        player_selected = st.selectbox("Player Focus", player_options, index=player_options.index(default_player) if default_player in player_options else 0)
+        player_selected = st.selectbox("Player Focus", player_options, index=player_options.index(default_player) if default_player and default_player in player_options else 0)
 
-team_games_view = team_games[team_games["venue"] == venue_filter] if venue_filter != "All" else team_games
-
-heat_events = goal_events
-if venue_filter != "All" and not heat_events.empty:
-    heat_events = heat_events[heat_events["venue"] == venue_filter]
-if strength_filter != "All" and not heat_events.empty:
-    heat_events = heat_events[heat_events["strength"].astype(str).str.contains(strength_filter, case=False, na=False)]
-
-shot_events_view = shot_events
+# Apply venue filter
+team_games_view = team_games[team_games["venue"] == venue_filter] if venue_filter != "All" and not team_games.empty else team_games
+shot_events_view = shot_events.copy() if not shot_events.empty else shot_events
 if venue_filter != "All" and not shot_events_view.empty:
     shot_events_view = shot_events_view[shot_events_view["venue"] == venue_filter]
 if strength_filter != "All" and not shot_events_view.empty:
     shot_events_view = shot_events_view[shot_events_view["strength"].astype(str).str.contains(strength_filter, case=False, na=False)]
 
-# Tabs
-team_tab, player_tab, heat_tab, outlook_tab, games_tab = st.tabs([
-    "Team Trends",
-    "Player Grades",
-    "Heat Maps",
-    "Season Outlook",
-    "Game Log",
+# ────────────────────────────────────────────────────────────────
+# Main Tabs
+# ────────────────────────────────────────────────────────────────
+tabs = st.tabs([
+    "🏒 Team Profile",
+    "🏆 Playoff Race",
+    "⚔️ Team Comparison",
+    "📊 Next Game",
+    "🎯 Shot Maps",
+    "⭐ Player Ratings",
+    "🎲 Game Simulation",
+    "📋 Game Log",
+    "🔧 Data Health",
 ])
 
-with team_tab:
-    _tgv = team_games_view if not team_games_view.empty else team_games
-    lcol, rcol = st.columns([1.35, 1])
-    with lcol:
-        st.plotly_chart(plot_team_trend(_tgv), use_container_width=True)
-    with rcol:
-        st.plotly_chart(plot_momentum(_tgv), use_container_width=True)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB: Team Profile
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tabs[0]:
+    if not team_standing.empty:
+        ts = team_standing.iloc[0]
+        p1, p2 = st.columns([1.2, 1])
 
-    st.plotly_chart(plot_impact_chart(_tgv), use_container_width=True)
+        with p1:
+            st.markdown(f"### {team_logo_html(focus_team, 40)} Team Identity", unsafe_allow_html=True)
+            profile_data = {
+                "Record": format_record(wins, losses, otl),
+                "Points": pts,
+                "Regulation Wins": int(ts.get("regulationWins", 0)),
+                "Goal Differential": f"{gd:+d}",
+                "Home": ts.get("homeRecord", "—"),
+                "Away": ts.get("awayRecord", "—"),
+                "Last 10": ts.get("last10Record", "—"),
+                "Streak": f"{ts.get('streakCode', '')} {ts.get('streakCount', '')}",
+                "Points %": f"{float(ts.get('pointPctg', 0)):.3f}",
+                "Division": ts.get("division", "—"),
+                "Conference Rank": conf_rank,
+                "Division Rank": div_rank,
+            }
+            for label, val in profile_data.items():
+                st.markdown(f"**{label}:** {val}")
 
-    st.markdown("### Opponent damage profile")
-    if not team_games.empty:
-        opp_profile = (
-            team_games.groupby("opponent", as_index=False)
-            .agg(
-                games=("gameId", "count"),
-                goalsAgainst=("oppScore", "sum"),
-                goalsFor=("teamScore", "sum"),
-                avgGoalDiff=("goalDiff", "mean"),
-                avgShotsAgainst=("oppShots", "mean"),
+        with p2:
+            st.markdown("### Projected Finish")
+            proj_data = {
+                "Projected Record": proj_rec,
+                "Projected Points": proj_pts,
+                "Projected Seed": proj_seed,
+                "Projected Opponent": f"{team_logo_html(str(proj_opp), 20)} {proj_opp}" if proj_opp and proj_opp != "—" and str(proj_opp) in TEAMS else str(proj_opp),
+                "Playoff Odds (Model)": f"{playoff_odds:.0f}%",
+                "Playoff Odds (MC Sim)": f"{mc_odds:.0f}%",
+                "Momentum": f"{momentum_val:.0f} — {team_games['momentumDirection'].iloc[-1] if not team_games.empty and 'momentumDirection' in team_games.columns else '—'}",
+            }
+            for label, val in proj_data.items():
+                st.markdown(f"**{label}:** {val}", unsafe_allow_html=True)
+
+    # Team trends
+    if not team_games_view.empty:
+        _tgv = team_games_view if not team_games_view.empty else team_games
+        st.markdown("### Team Trends")
+        tc1, tc2 = st.columns([1.3, 1])
+        with tc1:
+            st.plotly_chart(plot_team_trend(_tgv), use_container_width=True)
+        with tc2:
+            st.plotly_chart(plot_momentum(_tgv), use_container_width=True)
+        st.plotly_chart(plot_impact_chart(_tgv), use_container_width=True)
+
+    # Last 5 / Next 5
+    if not schedule.empty:
+        st.markdown("### Last 5 & Next 5 Games")
+        l5_col, n5_col = st.columns(2)
+
+        completed = schedule[schedule["isCompleted"]].sort_values("gameDate", ascending=False).head(5)
+        upcoming = schedule[~schedule["isCompleted"]].sort_values("gameDate").head(5)
+
+        with l5_col:
+            st.markdown("**Last 5 Games**")
+            if not completed.empty:
+                l5_rows = []
+                for _, g in completed.iterrows():
+                    opp = g["awayTeam"] if g["homeTeam"] == focus_team else g["homeTeam"]
+                    venue = "Home" if g["homeTeam"] == focus_team else "Away"
+                    ts_score = g["homeScore"] if g["homeTeam"] == focus_team else g["awayScore"]
+                    os_score = g["awayScore"] if g["homeTeam"] == focus_team else g["homeScore"]
+                    result = "W" if ts_score and os_score and ts_score > os_score else ("L" if ts_score and os_score and ts_score < os_score else "OTL")
+                    l5_rows.append({
+                        "Opponent": opp,
+                        "Score": f"{ts_score}–{os_score}" if ts_score is not None else "—",
+                        "Venue": venue,
+                        "Result": result,
+                        "Type": str(g.get("periodType", "REG")),
+                    })
+                l5_df = pd.DataFrame(l5_rows)
+                st.dataframe(
+                    l5_df.style.map(sl_result, subset=["Result"]),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.info("No completed games yet.")
+
+        with n5_col:
+            st.markdown("**Next 5 Games**")
+            if not upcoming.empty:
+                n5_rows = []
+                for _, g in upcoming.iterrows():
+                    opp = g["awayTeam"] if g["homeTeam"] == focus_team else g["homeTeam"]
+                    venue = "Home" if g["homeTeam"] == focus_team else "Away"
+                    date_str = g["gameDate"].strftime("%b %d") if pd.notna(g["gameDate"]) else "—"
+                    n5_rows.append({"Date": date_str, "Opponent": opp, "Venue": venue})
+                st.dataframe(pd.DataFrame(n5_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No upcoming games scheduled.")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB: Playoff Race
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tabs[1]:
+    st.markdown("### 🏆 League-Wide Playoff Race")
+
+    if not standings.empty:
+        conf_tab = st.radio("Conference", ["Western", "Western + Eastern"], horizontal=True)
+        show_confs = ["Western", "Eastern"] if "Eastern" in conf_tab else ["Western"]
+
+        for conf in show_confs:
+            st.markdown(f"#### {conf} Conference")
+            conf_mask = standings["conference"].astype(str).str.contains(conf, case=False, na=False)
+            conf_df = standings[conf_mask].copy()
+            if conf_df.empty:
+                continue
+
+            # Add MC sim data
+            conf_df["mcPlayoffPct"] = conf_df["teamAbbrev"].map(
+                lambda x: season_sim.get(x, {}).get("makePlayoffsPct", "—"),
             )
+            conf_df["mcMeanPts"] = conf_df["teamAbbrev"].map(
+                lambda x: season_sim.get(x, {}).get("meanFinalPts", "—"),
+            )
+
+            display_cols = [
+                "teamAbbrev", "points", "wins", "losses", "otLosses",
+                "goalDifferential", "regulationWins", "pointPctg",
+                "projectedPoints", "projectedRecord", "projectedSeed",
+                "projectedOpponent", "playoffOdds", "mcPlayoffPct", "mcMeanPts",
+                "homeRecord", "awayRecord", "last10Record",
+            ]
+            display_cols = [c for c in display_cols if c in conf_df.columns]
+            race_df = conf_df[display_cols].sort_values("points", ascending=False).copy()
+            race_df = race_df.rename(columns={
+                "teamAbbrev": "Team", "points": "Pts", "wins": "W", "losses": "L",
+                "otLosses": "OTL", "goalDifferential": "GD", "regulationWins": "RW",
+                "pointPctg": "Pts%", "projectedPoints": "Proj Pts",
+                "projectedRecord": "Proj Record", "projectedSeed": "Seed",
+                "projectedOpponent": "Proj Opp", "playoffOdds": "Odds%",
+                "mcPlayoffPct": "MC Odds%", "mcMeanPts": "MC Pts",
+                "homeRecord": "Home", "awayRecord": "Away", "last10Record": "L10",
+            })
+
+            st.dataframe(
+                race_df.style
+                .format({"Pts%": "{:.3f}", "Odds%": "{:.1f}"}, na_rep="—")
+                .map(sl_odds, subset=["Odds%"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # Points path for focus team
+    if not team_games.empty and "cumulativePoints" in team_games.columns:
+        st.markdown(f"### {team_logo_html(focus_team, 24)} Points Path", unsafe_allow_html=True)
+        st.plotly_chart(plot_points_path(team_games, proj_pts), use_container_width=True)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB: Team Comparison
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tabs[2]:
+    st.markdown("### ⚔️ Team Comparison — This Season")
+    comp1, comp2 = st.columns(2)
+    with comp1:
+        team_a = st.selectbox("Team A", ALL_TEAM_OPTIONS, index=ALL_TEAM_OPTIONS.index(focus_team), key="comp_a",
+                               format_func=lambda x: f"{x} — {TEAMS.get(x, {}).get('name', x)}")
+    with comp2:
+        default_b = "CGY" if "CGY" in ALL_TEAM_OPTIONS and team_a != "CGY" else ALL_TEAM_OPTIONS[1]
+        team_b = st.selectbox("Team B", ALL_TEAM_OPTIONS, index=ALL_TEAM_OPTIONS.index(default_b), key="comp_b",
+                               format_func=lambda x: f"{x} — {TEAMS.get(x, {}).get('name', x)}")
+
+    if not standings.empty:
+        row_a = standings[standings["teamAbbrev"] == team_a]
+        row_b = standings[standings["teamAbbrev"] == team_b]
+
+        if not row_a.empty and not row_b.empty:
+            a = row_a.iloc[0]
+            b = row_b.iloc[0]
+
+            metrics = [
+                ("Record", format_record(int(a.get("wins", 0)), int(a.get("losses", 0)), int(a.get("otLosses", 0))),
+                 format_record(int(b.get("wins", 0)), int(b.get("losses", 0)), int(b.get("otLosses", 0)))),
+                ("Points", int(a.get("points", 0)), int(b.get("points", 0))),
+                ("Projected Points", int(a.get("projectedPoints", 0)), int(b.get("projectedPoints", 0))),
+                ("Projected Record", a.get("projectedRecord", "—"), b.get("projectedRecord", "—")),
+                ("Goal Differential", int(a.get("goalDifferential", 0)), int(b.get("goalDifferential", 0))),
+                ("Regulation Wins", int(a.get("regulationWins", 0)), int(b.get("regulationWins", 0))),
+                ("Points %", f"{float(a.get('pointPctg', 0)):.3f}", f"{float(b.get('pointPctg', 0)):.3f}"),
+                ("Playoff Odds", f"{float(a.get('playoffOdds', 0)):.0f}%", f"{float(b.get('playoffOdds', 0)):.0f}%"),
+                ("Projected Seed", int(a.get("projectedSeed", 0)), int(b.get("projectedSeed", 0))),
+                ("Projected Opponent", a.get("projectedOpponent", "—"), b.get("projectedOpponent", "—")),
+                ("Home Record", a.get("homeRecord", "—"), b.get("homeRecord", "—")),
+                ("Away Record", a.get("awayRecord", "—"), b.get("awayRecord", "—")),
+                ("Last 10", a.get("last10Record", "—"), b.get("last10Record", "—")),
+                ("Streak", f"{a.get('streakCode', '')} {a.get('streakCount', '')}", f"{b.get('streakCode', '')} {b.get('streakCount', '')}"),
+            ]
+
+            comp_df = pd.DataFrame(metrics, columns=["Metric", team_a, team_b])
+            st.dataframe(comp_df, use_container_width=True, hide_index=True)
+
+            # MC sim comparison
+            st.markdown("#### Monte Carlo Season Simulation Comparison")
+            sim_a = season_sim.get(team_a, {})
+            sim_b = season_sim.get(team_b, {})
+            mc_metrics = [
+                ("MC Playoff Odds", f"{sim_a.get('makePlayoffsPct', '—')}%", f"{sim_b.get('makePlayoffsPct', '—')}%"),
+                ("MC Mean Final Pts", sim_a.get("meanFinalPts", "—"), sim_b.get("meanFinalPts", "—")),
+                ("MC Median Final Pts", sim_a.get("medianFinalPts", "—"), sim_b.get("medianFinalPts", "—")),
+                ("MC 10th Pctile Pts", sim_a.get("p10FinalPts", "—"), sim_b.get("p10FinalPts", "—")),
+                ("MC 90th Pctile Pts", sim_a.get("p90FinalPts", "—"), sim_b.get("p90FinalPts", "—")),
+            ]
+            st.dataframe(pd.DataFrame(mc_metrics, columns=["Metric", team_a, team_b]), use_container_width=True, hide_index=True)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB: Next Game
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tabs[3]:
+    st.markdown("### 📊 Next Game Expected Outcome")
+    upcoming = schedule[~schedule["isCompleted"]].sort_values("gameDate") if not schedule.empty else pd.DataFrame()
+
+    if not upcoming.empty:
+        next_game = upcoming.iloc[0]
+        opp = next_game["awayTeam"] if next_game["homeTeam"] == focus_team else next_game["homeTeam"]
+        is_home = next_game["homeTeam"] == focus_team
+        venue_str = "Home" if is_home else "Away"
+        date_str = next_game["gameDate"].strftime("%B %d, %Y") if pd.notna(next_game["gameDate"]) else "TBD"
+
+        ng1, ng2 = st.columns([0.5, 0.5])
+        with ng1:
+            st.markdown(f"**Date:** {date_str}")
+            st.markdown(f"**Venue:** {venue_str}")
+            st.markdown(f"**Matchup:** {team_logo_html(focus_team, 28)} vs {team_logo_html(opp, 28)}", unsafe_allow_html=True)
+
+        with ng2:
+            # Run game simulation
+            home_team = focus_team if is_home else opp
+            away_team = opp if is_home else focus_team
+            sim_result = simulate_game(home_team, away_team, standings, team_games if is_home else None, team_games if not is_home else None, n_sims=MC_SIMULATIONS)
+
+            st.markdown(f"**Projected Score:** {sim_result['projectedScore']}")
+            st.markdown(f"**Score Range:** {sim_result['scoreRange']}")
+            team_win_pct = sim_result["homeWinPct"] if is_home else sim_result["awayWinPct"]
+            opp_win_pct = sim_result["awayWinPct"] if is_home else sim_result["homeWinPct"]
+            team_reg_win = sim_result["homeRegWinPct"] if is_home else sim_result["awayRegWinPct"]
+
+            sl_conf = stoplight_for_value(team_win_pct, 55, 45)
+            st.markdown(f"**{focus_team} Win Prob:** {team_win_pct:.1f}% {team_logo_html(focus_team, 16)}", unsafe_allow_html=True)
+            st.markdown(f"**{opp} Win Prob:** {opp_win_pct:.1f}% {team_logo_html(opp, 16)}", unsafe_allow_html=True)
+            st.markdown(f"**Regulation Win:** {team_reg_win:.1f}%")
+            st.markdown(f"**OT Probability:** {sim_result['otPct']:.1f}%")
+            st.markdown(f"**Confidence:** {sim_result['confidence']}")
+
+        # Distribution chart
+        st.plotly_chart(
+            plot_game_sim_histogram(sim_result["homeGoalDist"], sim_result["awayGoalDist"], home_team, away_team),
+            use_container_width=True,
         )
-        opp_profile["damageIndex"] = (
-            0.45 * zscore(opp_profile["goalsAgainst"]).fillna(0)
-            + 0.35 * zscore(opp_profile["avgShotsAgainst"]).fillna(0)
-            - 0.20 * zscore(opp_profile["avgGoalDiff"]).fillna(0)
-        ) * 10 + 50
+
+        st.markdown("#### Simulation Drivers")
+        st.markdown(f"- Home expected goals: **{sim_result['homeXG']:.2f}**")
+        st.markdown(f"- Away expected goals: **{sim_result['awayXG']:.2f}**")
+        st.markdown(f"- Based on {sim_result['nSims']:,} simulations using team strength, home/away splits, momentum, and goal profiles")
+    else:
+        st.info("No upcoming games found.")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB: Shot Maps
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tabs[4]:
+    st.markdown("### 🎯 Shot & Goal Heat Maps")
+    if not shot_events_view.empty:
+        # Separate by shot type
+        team_shots = shot_events_view[shot_events_view["isTeamShot"]]
+        opp_shots = shot_events_view[~shot_events_view["isTeamShot"]]
+
+        # Goals vs shots
+        team_goals = team_shots[team_shots["eventType"].str.contains("goal", case=False, na=False)]
+        team_on_goal = team_shots[team_shots["eventType"].str.contains("shot", case=False, na=False)]
+        team_missed = team_shots[team_shots["eventType"].str.contains("miss", case=False, na=False)]
+        team_blocked = team_shots[team_shots["eventType"].str.contains("block", case=False, na=False)]
+
+        opp_goals = opp_shots[opp_shots["eventType"].str.contains("goal", case=False, na=False)]
+        opp_on_goal = opp_shots[opp_shots["eventType"].str.contains("shot", case=False, na=False)]
+
+        st.markdown(f"#### Offensive Shot Maps — {team_logo_html(focus_team, 20)}", unsafe_allow_html=True)
+        o1, o2 = st.columns(2)
+        with o1:
+            if not team_shots.empty:
+                st.plotly_chart(plot_rink_heatmap(team_shots, f"{focus_team} All Shot Attempts"), use_container_width=True)
+        with o2:
+            if not team_goals.empty:
+                st.plotly_chart(plot_rink_heatmap(team_goals, f"{focus_team} Goals Scored"), use_container_width=True)
+
+        st.markdown(f"#### Defensive Shot Maps — Against {team_logo_html(focus_team, 20)}", unsafe_allow_html=True)
+        d1, d2 = st.columns(2)
+        with d1:
+            if not opp_shots.empty:
+                st.plotly_chart(plot_rink_heatmap(opp_shots, "Opponent All Shot Attempts"), use_container_width=True)
+        with d2:
+            if not opp_goals.empty:
+                st.plotly_chart(plot_rink_heatmap(opp_goals, "Opponent Goals Against"), use_container_width=True)
+
+        # Zone summary
+        st.markdown("#### Zone Summary")
+        if not shot_events_view.empty and "zone" in shot_events_view.columns:
+            zone_summary = shot_events_view.groupby(["isTeamShot", "zone"], as_index=False).size()
+            zone_pivot = zone_summary.pivot(index="zone", columns="isTeamShot", values="size").fillna(0).reset_index()
+            if len(zone_pivot.columns) == 3:
+                zone_pivot.columns = ["Zone", "Against", "For"]
+            st.dataframe(zone_pivot, use_container_width=True, hide_index=True)
+    else:
+        st.info("No shot data available for the selected filters.")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB: Player Ratings
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tabs[5]:
+    st.markdown("### ⭐ Player Rating Trends")
+    if not player_games.empty:
+        # Player progression chart
+        if player_selected:
+            st.plotly_chart(plot_player_progress(player_games, player_selected), use_container_width=True)
+
+        # Player snapshot
+        latest = (
+            player_games.sort_values(["playerName", "gameDate", "gameId"])
+            .groupby("playerName", as_index=False)
+            .tail(1)
+        )
+        display_player_cols = ["playerName", "positionGroup", "rollingGrade", "consistencyScore",
+                                "recent5AvgPoints", "seasonAvgPoints", "trendFlag", "toi_min",
+                                "rolling5Toi", "toiFlag"]
+        display_player_cols = [c for c in display_player_cols if c in latest.columns]
+        latest_display = latest[display_player_cols].rename(columns={
+            "playerName": "Player", "positionGroup": "Pos", "rollingGrade": "Grade",
+            "consistencyScore": "Consistency", "recent5AvgPoints": "R5 Pts",
+            "seasonAvgPoints": "Avg Pts", "trendFlag": "Trend", "toi_min": "TOI",
+            "rolling5Toi": "R5 TOI", "toiFlag": "TOI Flag",
+        })
+
+        st.markdown("#### Current Ratings — Top 15")
+        top15 = latest_display.sort_values("Grade", ascending=False).head(15)
         st.dataframe(
-            opp_profile.sort_values("damageIndex", ascending=False)
-            .style.format({"avgGoalDiff": "{:.2f}", "avgShotsAgainst": "{:.1f}", "damageIndex": "{:.1f}"}, na_rep="-")
-            .applymap(_stoplight_damage, subset=["damageIndex"]),
+            top15.style
+            .format({"Grade": "{:.1f}", "Consistency": "{:.1f}", "R5 Pts": "{:.2f}", "Avg Pts": "{:.2f}", "TOI": "{:.1f}", "R5 TOI": "{:.1f}"}, na_rep="—")
+            .map(sl_grade, subset=["Grade", "Consistency"]),
             use_container_width=True,
             hide_index=True,
         )
 
-with player_tab:
-    if player_games.empty:
-        st.info("No player-game data available.")
-    else:
-        latest = player_games.sort_values(["playerName", "gameDate", "gameId"]).groupby("playerName", as_index=False).tail(1)
-        latest = latest[["playerName", "position", "rollingGrade", "consistencyScore", "recent5AvgPoints", "seasonAvgPoints", "trendFlag", "toi_min"]].rename(columns={"rollingGrade": "Current Grade", "consistencyScore": "Consistency", "recent5AvgPoints": "Recent 5 Avg Pts", "seasonAvgPoints": "Season Avg Pts", "toi_min": "Last TOI"})
-        top, bottom = st.columns([1.2, 1])
-        with top:
-            st.plotly_chart(plot_player_progress(player_games, player_selected), use_container_width=True)
-        with bottom:
-            selected_latest = latest[latest["playerName"] == player_selected]
-            st.markdown("### Player snapshot")
+        # Forwards, Defensemen, Goalies breakdown
+        for pos_label, pos_code in [("Forwards", "F"), ("Defensemen", "D"), ("Goalies", "G")]:
+            pos_df = latest_display[latest_display["Pos"] == pos_code].sort_values("Grade", ascending=False)
+            if not pos_df.empty:
+                st.markdown(f"#### {pos_label}")
+                st.dataframe(
+                    pos_df.style
+                    .format({"Grade": "{:.1f}", "Consistency": "{:.1f}", "R5 Pts": "{:.2f}", "Avg Pts": "{:.2f}", "TOI": "{:.1f}", "R5 TOI": "{:.1f}"}, na_rep="—")
+                    .map(sl_grade, subset=["Grade", "Consistency"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        # Ice Time tracking
+        st.markdown("#### Ice Time Tracking")
+        toi_cols = ["playerName", "positionGroup", "toi_min", "rolling5Toi", "seasonAvgToi",
+                    "toiDeviation", "toiFlag"]
+        toi_cols = [c for c in toi_cols if c in latest.columns]
+        if toi_cols:
+            toi_df = latest[toi_cols].rename(columns={
+                "playerName": "Player", "positionGroup": "Pos", "toi_min": "Last TOI",
+                "rolling5Toi": "R5 TOI", "seasonAvgToi": "Season Avg TOI",
+                "toiDeviation": "Deviation", "toiFlag": "Flag",
+            }).sort_values("Last TOI", ascending=False)
             st.dataframe(
-                selected_latest.style
-                .format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}, na_rep="-")
-                .applymap(_stoplight_grade, subset=["Current Grade", "Consistency"]),
+                toi_df.style.format({"Last TOI": "{:.1f}", "R5 TOI": "{:.1f}", "Season Avg TOI": "{:.1f}", "Deviation": "{:.2f}"}, na_rep="—"),
                 use_container_width=True, hide_index=True,
             )
-            st.markdown("### Top current grades")
-            st.dataframe(
-                latest.sort_values("Current Grade", ascending=False).head(15).style
-                .format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}, na_rep="-")
-                .applymap(_stoplight_grade, subset=["Current Grade", "Consistency"])
-                .applymap(lambda v: "background-color: #fef9c3; color: #713f12" if v == "Heating Up" else ("background-color: #fee2e2; color: #991b1b" if v == "Cooling Off" else ""), subset=["trendFlag"]),
-                use_container_width=True, hide_index=True,
-            )
-
-with heat_tab:
-    st.markdown("### Shot location heat maps")
-    if not shot_events_view.empty:
-        sf_col, sa_col = st.columns(2)
-        oilers_shots = shot_events_view[shot_events_view["isOilersShot"]]
-        opp_shots = shot_events_view[~shot_events_view["isOilersShot"]]
-        with sf_col:
-            if not oilers_shots.empty:
-                st.plotly_chart(plot_rink_heatmap(oilers_shots, "Oilers Shots Taken"), use_container_width=True)
-        with sa_col:
-            if not opp_shots.empty:
-                st.plotly_chart(plot_rink_heatmap(opp_shots, "Shots Against Oilers"), use_container_width=True)
     else:
-        st.info("No shot coordinate data available for the selected filters.")
+        st.info("No player data available.")
 
-    st.markdown("### Goal location heat maps")
-    st.caption("Team maps use goal event coordinates. On-ice player maps are best-effort approximations based on event payload player IDs when available.")
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB: Game Simulation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tabs[6]:
+    st.markdown("### 🎲 Monte Carlo Game Simulation")
+    st.markdown("Choose any two teams and venue to simulate a game using this season's data.")
 
-    left, right = st.columns(2)
-    if heat_events.empty:
-        st.info("No goal coordinate data available from play-by-play for the selected filters.")
-    else:
-        gf = heat_events[heat_events["isOilersGoal"]]
-        ga = heat_events[~heat_events["isOilersGoal"]]
-        with left:
-            st.plotly_chart(plot_rink_heatmap(gf, "Oilers Goals Scored Locations"), use_container_width=True)
-        with right:
-            st.plotly_chart(plot_rink_heatmap(ga, "Oilers Goals Against Locations"), use_container_width=True)
+    gs1, gs2, gs3 = st.columns(3)
+    with gs1:
+        sim_home = st.selectbox("Home Team", ALL_TEAM_OPTIONS, index=ALL_TEAM_OPTIONS.index(focus_team), key="sim_home",
+                                 format_func=lambda x: f"{x} — {TEAMS.get(x, {}).get('name', x)}")
+    with gs2:
+        sim_default_away = "CGY" if "CGY" in ALL_TEAM_OPTIONS and sim_home != "CGY" else ALL_TEAM_OPTIONS[1]
+        sim_away = st.selectbox("Away Team", ALL_TEAM_OPTIONS, index=ALL_TEAM_OPTIONS.index(sim_default_away), key="sim_away",
+                                 format_func=lambda x: f"{x} — {TEAMS.get(x, {}).get('name', x)}")
+    with gs3:
+        n_sims_choice = st.selectbox("Simulations", [1000, 5000, 10000], index=2)
 
-        st.markdown("### On-ice trend views")
-        player_id_lookup = player_games[["playerName", "playerId"]].dropna().drop_duplicates() if not player_games.empty else pd.DataFrame(columns=["playerName", "playerId"])
-        selected_pid = None
-        if not player_id_lookup.empty and player_selected in player_id_lookup["playerName"].values:
-            selected_pid = int(player_id_lookup[player_id_lookup["playerName"] == player_selected]["playerId"].iloc[0])
+    if st.button("🎲 Run Simulation", type="primary"):
+        with st.spinner(f"Simulating {n_sims_choice:,} games..."):
+            sim_result = simulate_game(sim_home, sim_away, standings, n_sims=n_sims_choice)
 
-        if selected_pid is not None:
-            player_heat = heat_events[heat_events["scorerId"].eq(selected_pid) | heat_events["eventHasOilersPlayerId"]]
-            ph_left, ph_right = st.columns(2)
-            with ph_left:
-                ph_gf = player_heat[player_heat["isOilersGoal"]]
-                if not ph_gf.empty:
-                    st.plotly_chart(plot_rink_heatmap(ph_gf, f"{player_selected} On-Ice / Event-Linked Goals For"), use_container_width=True)
-                else:
-                    st.info("No linked goals-for events found for this player under current filters.")
-            with ph_right:
-                ph_ga = player_heat[~player_heat["isOilersGoal"]]
-                if not ph_ga.empty:
-                    st.plotly_chart(plot_rink_heatmap(ph_ga, f"{player_selected} On-Ice / Event-Linked Goals Against"), use_container_width=True)
-                else:
-                    st.info("No linked goals-against events found for this player under current filters.")
+        sr1, sr2 = st.columns(2)
+        with sr1:
+            st.markdown(f"#### {team_logo_html(sim_home, 28)} {sim_home} (Home)", unsafe_allow_html=True)
+            st.metric("Win Probability", f"{sim_result['homeWinPct']:.1f}%")
+            st.metric("Regulation Win", f"{sim_result['homeRegWinPct']:.1f}%")
+            st.metric("Expected Goals", f"{sim_result['homeGoalsMean']:.2f}")
 
-        zone_summary = heat_events.groupby(["isOilersGoal", "zone"], as_index=False).size()
-        zone_pivot = zone_summary.pivot(index="zone", columns="isOilersGoal", values="size").fillna(0).reset_index()
-        zone_pivot.columns = ["zone", "Goals Against", "Goals For"] if len(zone_pivot.columns) == 3 else zone_pivot.columns
-        st.markdown("### Zone summary")
-        st.dataframe(zone_pivot, use_container_width=True, hide_index=True)
+        with sr2:
+            st.markdown(f"#### {team_logo_html(sim_away, 28)} {sim_away} (Away)", unsafe_allow_html=True)
+            st.metric("Win Probability", f"{sim_result['awayWinPct']:.1f}%")
+            st.metric("Regulation Win", f"{sim_result['awayRegWinPct']:.1f}%")
+            st.metric("Expected Goals", f"{sim_result['awayGoalsMean']:.2f}")
 
-with outlook_tab:
-    a, b, c, d = st.columns(4)
-    a.metric("Current points", outlook["current_points"])
-    b.metric("Games remaining", outlook["remaining_games"])
-    c.metric("Projected points", outlook["projected_points"])
-    d.metric("Playoff odds proxy", f"{outlook['playoff_odds_proxy']}%")
+        st.markdown(f"**Projected Score:** {sim_result['projectedScore']}")
+        st.markdown(f"**Score Range:** {sim_result['scoreRange']}")
+        st.markdown(f"**OT Probability:** {sim_result['otPct']:.1f}%")
+        st.markdown(f"**Confidence:** {sim_result['confidence']}")
 
-    left, right = st.columns([1.2, 1])
-    with left:
-        if not team_games.empty:
-            pts_path = team_games[["gameDate", "cumulativePoints"]].copy()
-            pts_path["paceLine82"] = np.linspace(0, outlook["projected_points"], len(pts_path))
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=pts_path["gameDate"], y=pts_path["cumulativePoints"], mode="lines+markers", name="Actual", line={**_SPLINE, "color": "#3b82f6", "width": 2.5}, marker=dict(size=6)))
-            fig.add_trace(go.Scatter(x=pts_path["gameDate"], y=pts_path["paceLine82"], mode="lines", name="Projected pace", line=dict(dash="dash", color="#94a3b8", width=1.5)))
-            fig.update_layout(**_CHART_LAYOUT, height=380, title="Points Path")
-            st.plotly_chart(fig, use_container_width=True)
-    with right:
-        st.markdown("### Stretch-run context")
-        st.write(
-            f"Conference rank: {outlook['conference_rank'] if outlook['conference_rank'] is not None else 'N/A'}"
+        st.plotly_chart(
+            plot_game_sim_histogram(sim_result["homeGoalDist"], sim_result["awayGoalDist"], sim_home, sim_away),
+            use_container_width=True,
         )
-        st.write(
-            f"West cutoff points: {outlook['west_cutoff_points'] if outlook['west_cutoff_points'] is not None else 'N/A'}"
-        )
-        st.write(
-            f"Gap to cutoff: {outlook['gap_to_cutoff'] if outlook['gap_to_cutoff'] is not None else 'N/A'}"
-        )
-        if not remaining_games_df.empty:
-            rem = remaining_games_df.assign(opponent=np.where(remaining_games_df["homeTeam"] == TEAM_TRI, remaining_games_df["awayTeam"], remaining_games_df["homeTeam"]))
-            st.markdown("### Remaining schedule")
-            st.dataframe(rem[["gameDate", "homeTeam", "awayTeam", "opponent"]].rename(columns={"gameDate": "Date"}), use_container_width=True, hide_index=True)
 
-with games_tab:
-    st.markdown("### Full season schedule")
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB: Game Log
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tabs[7]:
+    st.markdown("### 📋 Season Schedule & Game Log")
+
     if not schedule.empty:
-        opp_col = np.where(schedule["homeTeam"] == TEAM_TRI, schedule["awayTeam"], schedule["homeTeam"])
-        venue_col = np.where(schedule["homeTeam"] == TEAM_TRI, "Home", "Away")
-        team_score_col = np.where(schedule["homeTeam"] == TEAM_TRI, schedule["homeScore"], schedule["awayScore"])
-        opp_score_col = np.where(schedule["homeTeam"] == TEAM_TRI, schedule["awayScore"], schedule["homeScore"])
+        sched_display = schedule.copy()
+        opp_col = np.where(sched_display["homeTeam"] == focus_team, sched_display["awayTeam"], sched_display["homeTeam"])
+        venue_col = np.where(sched_display["homeTeam"] == focus_team, "Home", "Away")
+        team_score_col = np.where(sched_display["homeTeam"] == focus_team, sched_display["homeScore"], sched_display["awayScore"])
+        opp_score_col = np.where(sched_display["homeTeam"] == focus_team, sched_display["awayScore"], sched_display["homeScore"])
         result_col = np.where(
-            ~schedule["isCompleted"], "Upcoming",
+            ~sched_display["isCompleted"], "Upcoming",
             np.where(team_score_col > opp_score_col, "W", np.where(team_score_col == opp_score_col, "OTL", "L")),
         )
         full_sched = pd.DataFrame({
-            "Date": schedule["gameDate"].dt.strftime("%b %d"),
+            "Date": sched_display["gameDate"].dt.strftime("%b %d"),
             "Venue": venue_col,
             "Opponent": opp_col,
-            "Score": np.where(schedule["isCompleted"], team_score_col.astype(str) + "–" + opp_score_col.astype(str), "—"),
+            "Score": np.where(sched_display["isCompleted"], team_score_col.astype(str) + "–" + opp_score_col.astype(str), "—"),
             "Result": result_col,
         })
         st.dataframe(
-            full_sched.style.applymap(_stoplight_result, subset=["Result"]),
-            use_container_width=True,
-            hide_index=True,
+            full_sched.style.map(sl_result, subset=["Result"]),
+            use_container_width=True, hide_index=True,
         )
 
-    st.markdown("### Team game log")
     if not team_games.empty:
+        st.markdown("### Team Game Log")
+        game_log_cols = ["gameDate", "opponent", "venue", "teamScore", "oppScore", "result",
+                         "goalDiff", "shotDiff", "momentumScore"]
+        game_log_cols = [c for c in game_log_cols if c in team_games.columns]
         st.dataframe(
-            team_games.style
-            .format({"teamFaceoffPct": "{:.1f}", "rolling3GoalDiff": "{:.2f}", "rolling3ShotDiff": "{:.2f}", "momentumScore": "{:.1f}"}, na_rep="-")
-            .applymap(_stoplight_result, subset=["result"])
-            .applymap(_stoplight_momentum, subset=["momentumScore"]),
+            team_games[game_log_cols].style
+            .format({"momentumScore": "{:.1f}", "shotDiff": "{:.1f}"}, na_rep="—")
+            .map(sl_result, subset=["result"])
+            .map(sl_momentum, subset=["momentumScore"] if "momentumScore" in game_log_cols else []),
             use_container_width=True, hide_index=True,
         )
-    st.markdown("### Player game log")
-    if not player_games.empty:
+
+    if not player_games.empty and player_selected:
+        st.markdown(f"### Player Game Log — {player_selected}")
         pview = player_games[player_games["playerName"] == player_selected]
+        plog_cols = ["gameDate", "goals", "assists", "points", "shots", "toi_min", "gameGrade", "rollingGrade", "trendFlag"]
+        plog_cols = [c for c in plog_cols if c in pview.columns]
         st.dataframe(
-            pview[["gameDate", "goals", "assists", "points", "shots", "toi_min", "gameGrade", "rollingGrade", "trendFlag"]]
-            .style.format({"toi_min": "{:.1f}", "gameGrade": "{:.1f}", "rollingGrade": "{:.1f}"}, na_rep="-")
-            .applymap(_stoplight_grade, subset=["gameGrade", "rollingGrade"]),
+            pview[plog_cols].style
+            .format({"toi_min": "{:.1f}", "gameGrade": "{:.1f}", "rollingGrade": "{:.1f}"}, na_rep="—")
+            .map(sl_grade, subset=["gameGrade", "rollingGrade"] if "gameGrade" in plog_cols else []),
             use_container_width=True, hide_index=True,
         )
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB: Data Health
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tabs[8]:
+    st.markdown("### 🔧 Data Health Panel")
+
+    if health.degraded:
+        st.warning("⚠️ Some data sources are degraded. See details below.")
+
+    health_rows = health.summary_rows()
+    if health_rows:
+        health_df = pd.DataFrame(health_rows)
+        st.dataframe(health_df, use_container_width=True, hide_index=True)
+
+    if health.warnings:
+        st.markdown("#### Warnings")
+        for w in health.warnings:
+            st.markdown(f"- ⚠️ {w}")
+
+    st.markdown("#### Season State")
+    st.markdown(f"- **Mode:** {season_state.replace('_', ' ').title()}")
+    st.markdown(f"- **Focus Team:** {focus_team}")
+    st.markdown(f"- **Season:** {SEASON[:4]}–{SEASON[4:]}")
+    st.markdown(f"- **Teams Loaded:** {len(standings) if not standings.empty else 0}")
+    st.markdown(f"- **Games Parsed:** {len(team_games) if not team_games.empty else 0}")
+    st.markdown(f"- **Players Tracked:** {player_games['playerName'].nunique() if not player_games.empty else 0}")
+    st.markdown(f"- **Shot Events:** {len(shot_events) if not shot_events.empty else 0}")
+    st.markdown(f"- **MC Simulations:** {'✅ Available' if season_sim else '❌ Unavailable'}")
