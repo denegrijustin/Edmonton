@@ -14,7 +14,3 @@ SIM_HOME_ADV = 0.15       # home ice advantage in expected goals per game
 
 # Playoff bracket: seed → opponent seed
 PLAYOFF_BRACKET_MAP = {1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 3, 7: 2, 8: 1}
-
-# MoneyPuck configuration
-MONEYPUCK_URL = "https://moneypuck.com/predictions.htm"
-MONEYPUCK_CACHE_TTL = 3600  # seconds
