@@ -12,7 +12,15 @@ SEASON = "20252026"
 TIMEOUT = 30
 DEFAULT_TEAM = "EDM"
 GAMES_IN_SEASON = 82
-LEAGUE_AVG_GPG = 3.1
+LEAGUE_AVG_GPG = 3.1  # 2024-25 NHL season average; update each season
+
+# Monte Carlo simulation parameters
+SIM_SEASON_WEIGHT = 0.70  # 70% full-season strength
+SIM_LAST10_WEIGHT = 0.30  # 30% last-10 form
+SIM_HOME_ADV = 0.15       # home ice advantage in expected goals per game
+
+# Playoff bracket: seed → opponent seed
+PLAYOFF_BRACKET_MAP = {1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 3, 7: 2, 8: 1}
 
 
 def logo_url(abbrev: str) -> str:
@@ -583,6 +591,8 @@ def _project_playoff_seed(
     team_proj_pts: float,
 ) -> Tuple[Optional[int], Optional[str]]:
     """Project conference seed (1–8) and first-round opponent for a team."""
+    if standings_df.empty or "conference" not in standings_df.columns or not conf_name:
+        return None, None
     mask = standings_df["conference"].astype(str).str.contains(conf_name, case=False, na=False)
     conf = standings_df[mask].copy()
     if conf.empty:
@@ -602,8 +612,7 @@ def _project_playoff_seed(
         return None, None
 
     seed = playoff_8.index(team_abbrev) + 1
-    bracket = {1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 3, 7: 2, 8: 1}
-    opp_seed = bracket.get(seed)
+    opp_seed = PLAYOFF_BRACKET_MAP.get(seed)
     opp = playoff_8[opp_seed - 1] if opp_seed and opp_seed <= len(playoff_8) else None
     return seed, opp
 
@@ -637,7 +646,7 @@ def compute_outlook(
 
     # Cutoff (8th seed in conference)
     cutoff = gap = np.nan
-    if conf_name and not standings_df.empty:
+    if conf_name and not standings_df.empty and "conference" in standings_df.columns:
         mask = standings_df["conference"].astype(str).str.contains(conf_name, case=False, na=False)
         c_pts = pd.to_numeric(standings_df.loc[mask, "points"], errors="coerce").sort_values(ascending=False)
         if len(c_pts) >= 8:
@@ -678,6 +687,8 @@ def compute_outlook(
 
 
 def build_playoff_projection_table(standings_df: pd.DataFrame, conf_name: str) -> pd.DataFrame:
+    if standings_df.empty or "conference" not in standings_df.columns or not conf_name:
+        return pd.DataFrame()
     mask = standings_df["conference"].astype(str).str.contains(conf_name, case=False, na=False)
     conf = standings_df[mask].copy()
     if conf.empty:
@@ -701,10 +712,14 @@ def build_playoff_projection_table(standings_df: pd.DataFrame, conf_name: str) -
 def get_seed_prob_distribution(
     team_abbrev: str, standings_df: pd.DataFrame
 ) -> Dict[int, float]:
+    if standings_df.empty or "teamAbbrev" not in standings_df.columns:
+        return {}
     tr = standings_df[standings_df["teamAbbrev"] == team_abbrev]
     if tr.empty:
         return {}
     conf_name = str(tr.iloc[0].get("conference") or "")
+    if not conf_name or "conference" not in standings_df.columns:
+        return {}
     mask = standings_df["conference"].astype(str).str.contains(conf_name, case=False, na=False)
     conf = standings_df[mask].copy()
     conf["points"] = pd.to_numeric(conf["points"], errors="coerce").fillna(0)
@@ -733,14 +748,10 @@ def monte_carlo_sim(
     home_team: str = "A",
     n_sims: int = 10000,
 ) -> Dict[str, Any]:
-    SEASON_W = 0.70
-    LAST10_W = 0.30
-    HOME_ADV = 0.15
-
-    a_attack = SEASON_W * team_a_metrics["gf_per_game"] + LAST10_W * team_a_metrics["last10_gf_per_game"]
-    a_defense = SEASON_W * team_a_metrics["ga_per_game"] + LAST10_W * team_a_metrics["last10_ga_per_game"]
-    b_attack = SEASON_W * team_b_metrics["gf_per_game"] + LAST10_W * team_b_metrics["last10_gf_per_game"]
-    b_defense = SEASON_W * team_b_metrics["ga_per_game"] + LAST10_W * team_b_metrics["last10_ga_per_game"]
+    a_attack = SIM_SEASON_WEIGHT * team_a_metrics["gf_per_game"] + SIM_LAST10_WEIGHT * team_a_metrics["last10_gf_per_game"]
+    a_defense = SIM_SEASON_WEIGHT * team_a_metrics["ga_per_game"] + SIM_LAST10_WEIGHT * team_a_metrics["last10_ga_per_game"]
+    b_attack = SIM_SEASON_WEIGHT * team_b_metrics["gf_per_game"] + SIM_LAST10_WEIGHT * team_b_metrics["last10_gf_per_game"]
+    b_defense = SIM_SEASON_WEIGHT * team_b_metrics["ga_per_game"] + SIM_LAST10_WEIGHT * team_b_metrics["last10_ga_per_game"]
 
     # Expected goals per game via interaction model
     a_lambda = (a_attack / LEAGUE_AVG_GPG) * b_defense
@@ -748,11 +759,11 @@ def monte_carlo_sim(
 
     # Apply home ice
     if home_team == "A":
-        a_lambda = a_lambda + HOME_ADV
-        b_lambda = max(b_lambda - HOME_ADV, 0.5)
+        a_lambda = a_lambda + SIM_HOME_ADV
+        b_lambda = max(b_lambda - SIM_HOME_ADV, 0.5)
     else:
-        b_lambda = b_lambda + HOME_ADV
-        a_lambda = max(a_lambda - HOME_ADV, 0.5)
+        b_lambda = b_lambda + SIM_HOME_ADV
+        a_lambda = max(a_lambda - SIM_HOME_ADV, 0.5)
 
     a_lambda = max(float(a_lambda), 0.5)
     b_lambda = max(float(b_lambda), 0.5)
@@ -953,7 +964,10 @@ with st.spinner("Loading NHL standings data…"):
     except Exception as _e:
         standings_df = pd.DataFrame()
         team_metrics_dict = {}
-        st.warning(f"Could not load standings: {_e}")
+        st.warning(
+            f"Failed to load NHL standings data (check network connection and try refreshing). "
+            f"Details: {_e}"
+        )
 
 # Sorted team list; ensure DEFAULT is first if available
 all_teams: List[str] = (
@@ -1295,8 +1309,7 @@ with tab_pl:
             seed_probs = get_seed_prob_distribution(selected_team, standings_df)
             if seed_probs and sel_outlook.get("projected_seed"):
                 cur_seed = int(sel_outlook["projected_seed"])
-                bracket_map = {1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 3, 7: 2, 8: 1}
-                alt_seed_num = bracket_map.get(max(1, cur_seed - 1) if cur_seed > 1 else cur_seed + 1)
+                alt_seed_num = PLAYOFF_BRACKET_MAP.get(max(1, cur_seed - 1) if cur_seed > 1 else cur_seed + 1)
                 if alt_seed_num and not standings_df.empty:
                     mask_c = standings_df["conference"].astype(str).str.contains(conf_name, case=False, na=False)
                     cdf = standings_df[mask_c].copy()
@@ -1543,11 +1556,16 @@ with tab_sim:
     sim_ma = team_metrics_dict.get(sim_a, compute_team_metrics(sim_a, standings_df))
     sim_mb = team_metrics_dict.get(sim_b, compute_team_metrics(sim_b, standings_df))
 
-    # Always run; button allows re-seeding
+    # Use a session-state counter to re-seed the simulation without clearing shared caches
+    if "sim_seed" not in st.session_state:
+        st.session_state["sim_seed"] = 0
     if st.button("🔄 Re-run Simulation", type="secondary"):
-        st.cache_data.clear()
+        st.session_state["sim_seed"] += 1
 
+    sim_seed = st.session_state["sim_seed"]
     with st.spinner("Running 10,000 simulations…"):
+        rng_seed = (hash(f"{sim_a}{sim_b}{home_flag}{sim_seed}") & 0xFFFFFFFF)
+        rng_state = np.random.default_rng(rng_seed)
         sim_res = monte_carlo_sim(sim_ma, sim_mb, home_team=home_flag, n_sims=10000)
 
     a_win = sim_res["a_win_pct"]
@@ -1658,27 +1676,29 @@ with tab_sim:
             st.markdown(f"{_esl} **{_elbl}:** {_eval:+.3f} — *{_dir}*")
 
         with st.expander("ℹ️ Model Weighting Logic"):
+            sw_pct = int(SIM_SEASON_WEIGHT * 100)
+            l10_pct = int(SIM_LAST10_WEIGHT * 100)
             st.markdown(
                 f"""
 **Blended team strength (per team):**
-- Season average: **70%** weight
-- Last 10 games: **30%** weight
+- Season average: **{sw_pct}%** weight (`SIM_SEASON_WEIGHT`)
+- Last 10 games: **{l10_pct}%** weight (`SIM_LAST10_WEIGHT`)
 
 **Team A — {sim_a}**
 | Metric | Season | Last 10 | Blended |
 |---|---|---|---|
-| GF/G | {sim_ma['gf_per_game']:.2f} | {sim_ma['last10_gf_per_game']:.2f} | {(0.7*sim_ma['gf_per_game']+0.3*sim_ma['last10_gf_per_game']):.2f} |
-| GA/G | {sim_ma['ga_per_game']:.2f} | {sim_ma['last10_ga_per_game']:.2f} | {(0.7*sim_ma['ga_per_game']+0.3*sim_ma['last10_ga_per_game']):.2f} |
+| GF/G | {sim_ma['gf_per_game']:.2f} | {sim_ma['last10_gf_per_game']:.2f} | {(SIM_SEASON_WEIGHT*sim_ma['gf_per_game']+SIM_LAST10_WEIGHT*sim_ma['last10_gf_per_game']):.2f} |
+| GA/G | {sim_ma['ga_per_game']:.2f} | {sim_ma['last10_ga_per_game']:.2f} | {(SIM_SEASON_WEIGHT*sim_ma['ga_per_game']+SIM_LAST10_WEIGHT*sim_ma['last10_ga_per_game']):.2f} |
 
 **Team B — {sim_b}**
 | Metric | Season | Last 10 | Blended |
 |---|---|---|---|
-| GF/G | {sim_mb['gf_per_game']:.2f} | {sim_mb['last10_gf_per_game']:.2f} | {(0.7*sim_mb['gf_per_game']+0.3*sim_mb['last10_gf_per_game']):.2f} |
-| GA/G | {sim_mb['ga_per_game']:.2f} | {sim_mb['last10_ga_per_game']:.2f} | {(0.7*sim_mb['ga_per_game']+0.3*sim_mb['last10_ga_per_game']):.2f} |
+| GF/G | {sim_mb['gf_per_game']:.2f} | {sim_mb['last10_gf_per_game']:.2f} | {(SIM_SEASON_WEIGHT*sim_mb['gf_per_game']+SIM_LAST10_WEIGHT*sim_mb['last10_gf_per_game']):.2f} |
+| GA/G | {sim_mb['ga_per_game']:.2f} | {sim_mb['last10_ga_per_game']:.2f} | {(SIM_SEASON_WEIGHT*sim_mb['ga_per_game']+SIM_LAST10_WEIGHT*sim_mb['last10_ga_per_game']):.2f} |
 
 **Expected goals λ:** Team A = {a_lam:.3f} · Team B = {b_lam:.3f}
 
-**Home ice advantage:** +0.15 goals added to home team's λ, −0.15 from away team.
+**Home ice advantage:** +{SIM_HOME_ADV} goals added to home team's λ, −{SIM_HOME_ADV} from away team.
 
 **Simulation:** Poisson(λ) draws × 10,000. Tied games go to OT/SO (50/50 coin flip).
                 """
