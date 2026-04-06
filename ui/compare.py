@@ -1,4 +1,4 @@
-"""Compare tab (Tab 4) — side-by-side team comparison."""
+"""Compare tab (Tab 4) — side-by-side team comparison using CSS grid."""
 
 from typing import Any, Dict, List, Tuple
 
@@ -6,9 +6,65 @@ import streamlit as st
 
 from models.projections import compute_outlook
 from providers.metrics_provider import compute_team_metrics
-from ui.components import kpi_html, logo_card_html
+from ui.components import logo_card_html
 from utils.formatters import fmt_record, safe_format
+from utils.logos import logo_url
 from utils.stoplights import stoplight
+
+
+# CSS grid layout for the comparison table
+_GRID_CSS = """
+<style>
+.cmp-grid {
+  display: grid;
+  grid-template-columns: 1fr 140px 1fr;
+  gap: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  font-family: inherit;
+}
+.cmp-grid .cmp-header {
+  background: #f8fafc;
+  font-weight: 700;
+  font-size: 0.95rem;
+  padding: 10px 12px;
+  border-bottom: 2px solid #e2e8f0;
+}
+.cmp-grid .cmp-left  { text-align: right; }
+.cmp-grid .cmp-mid   { text-align: center; background: #f8fafc; }
+.cmp-grid .cmp-right { text-align: left; }
+.cmp-grid .cmp-row-left  {
+  text-align: right;
+  padding: 6px 8px;
+  font-size: 0.93rem;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: middle;
+}
+.cmp-grid .cmp-row-mid {
+  text-align: center;
+  padding: 6px 8px;
+  font-size: 0.80rem;
+  color: #64748b;
+  font-weight: 600;
+  background: #f8fafc;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: middle;
+}
+.cmp-grid .cmp-row-right {
+  text-align: left;
+  padding: 6px 8px;
+  font-size: 0.93rem;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: middle;
+}
+@media (max-width: 640px) {
+  .cmp-grid .cmp-row-left,
+  .cmp-grid .cmp-row-right { font-size: 0.82rem; }
+  .cmp-grid .cmp-row-mid   { font-size: 0.72rem; }
+}
+</style>
+"""
 
 
 def render(
@@ -30,7 +86,7 @@ def render(
     oa = compute_outlook(team_a_sel, standings_df, team_metrics_dict)
     ob = compute_outlook(team_b_sel, standings_df, team_metrics_dict)
 
-    # Logo headers
+    # ── Logo headers ──────────────────────────────────────────────────────────
     hdr_a, hdr_vs, hdr_b = st.columns([2, 1, 2])
     with hdr_a:
         st.markdown(
@@ -58,66 +114,57 @@ def render(
 
     st.markdown("---")
 
-    # Mirrored comparison rows
-    def _cmp_rows(
-        label: str,
-        val_a: Any,
-        val_b: Any,
-        good: float,
-        bad: float,
-        hib: bool = True,
-        fmt_str: str = "{}",
-    ) -> Tuple[str, str, str, str, str]:
-        va_s = safe_format(fmt_str, val_a, str(val_a))
-        vb_s = safe_format(fmt_str, val_b, str(val_b))
-        try:
-            sl_a = stoplight(float(val_a), good, bad, hib)
-            sl_b = stoplight(float(val_b), good, bad, hib)
-        except Exception:
-            sl_a = sl_b = "⚪"
-        return label, sl_a, va_s, vb_s, sl_b
-
-    cmp_data = [
-        _cmp_rows("Current Points", ma["points"], mb["points"], 90, 70, True, "{:.0f}"),
-        _cmp_rows("Proj. Points", oa["projected_points"], ob["projected_points"], 95, 80, True, "{:.0f}"),
-        _cmp_rows("Playoff Odds %", oa["playoff_odds"], ob["playoff_odds"], 70, 45, True, "{:.0f}"),
-        _cmp_rows("Goal Differential", ma["goalDifferential"], mb["goalDifferential"], 10, -10, True, "{:+.0f}"),
-        _cmp_rows("GF / Game", ma["gf_per_game"], mb["gf_per_game"], 3.2, 2.8, True, "{:.2f}"),
-        _cmp_rows("GA / Game", ma["ga_per_game"], mb["ga_per_game"], 2.5, 3.0, False, "{:.2f}"),
-        _cmp_rows("Momentum", ma["momentum"], mb["momentum"], 55, 45, True, "{:.0f}"),
-        _cmp_rows("Last 10 GF/G", ma["last10_gf_per_game"], mb["last10_gf_per_game"], 3.2, 2.8, True, "{:.2f}"),
-        _cmp_rows("Last 10 GA/G", ma["last10_ga_per_game"], mb["last10_ga_per_game"], 2.5, 3.0, False, "{:.2f}"),
-        _cmp_rows(
-            "Last 10 Record",
-            ma["l10W"] * 2 + ma["l10OTL"],
-            mb["l10W"] * 2 + mb["l10OTL"],
-            14, 10, True, "{:.0f} pts",
-        ),
+    # ── CSS grid comparison table ─────────────────────────────────────────────
+    # Metric definitions: (label, val_a, val_b, good, bad, higher_is_better, fmt_str)
+    metrics_def = [
+        ("Current Points",    ma["points"],                       mb["points"],                       90,  70,  True,  "{:.0f}"),
+        ("Proj. Points",      oa["projected_points"],             ob["projected_points"],             95,  80,  True,  "{:.0f}"),
+        ("Playoff Odds %",    oa["playoff_odds"],                 ob["playoff_odds"],                 70,  45,  True,  "{:.0f}"),
+        ("Goal Differential", ma["goalDifferential"],             mb["goalDifferential"],             10,  -10, True,  "{:+.0f}"),
+        ("GF / Game",         ma["gf_per_game"],                  mb["gf_per_game"],                  3.2, 2.8, True,  "{:.2f}"),
+        ("GA / Game",         ma["ga_per_game"],                  mb["ga_per_game"],                  2.5, 3.0, False, "{:.2f}"),
+        ("Momentum",          ma["momentum"],                     mb["momentum"],                     55,  45,  True,  "{:.0f}"),
+        ("Last 10 GF/G",      ma["last10_gf_per_game"],           mb["last10_gf_per_game"],           3.2, 2.8, True,  "{:.2f}"),
+        ("Last 10 GA/G",      ma["last10_ga_per_game"],           mb["last10_ga_per_game"],           2.5, 3.0, False, "{:.2f}"),
+        ("Last 10 Pts",       ma["l10W"] * 2 + ma["l10OTL"],     mb["l10W"] * 2 + mb["l10OTL"],     14,  10,  True,  "{:.0f} pts"),
     ]
 
-    # Column headers
-    hc_a, hc_mid, hc_b = st.columns([3, 3, 3])
-    hc_a.markdown(f"<div style='text-align:right;font-weight:700;color:#1d4ed8;'>{team_a_sel}</div>", unsafe_allow_html=True)
-    hc_mid.markdown("<div style='text-align:center;font-weight:700;color:#64748b;'>Metric</div>", unsafe_allow_html=True)
-    hc_b.markdown(f"<div style='text-align:left;font-weight:700;color:#dc2626;'>{team_b_sel}</div>", unsafe_allow_html=True)
+    def _fmt_val(fmt_str: str, val: Any) -> str:
+        return safe_format(fmt_str, val, str(val) if val is not None else "—")
 
-    for _lbl, _sla, _va, _vb, _slb in cmp_data:
-        _ca, _cb, _cc = st.columns([3, 3, 3])
-        _ca.markdown(
-            f"<div style='text-align:right;padding:4px 8px;font-size:0.95rem;'>{_sla} <b>{_va}</b></div>",
-            unsafe_allow_html=True,
+    def _sl(val: Any, good: float, bad: float, hib: bool) -> str:
+        try:
+            return stoplight(float(val), good, bad, hib)
+        except Exception:
+            return "⚪"
+
+    # Build the HTML grid
+    rows_html = ""
+    for label, va, vb, good, bad, hib, fmt in metrics_def:
+        va_s = _fmt_val(fmt, va)
+        vb_s = _fmt_val(fmt, vb)
+        sl_a = _sl(va, good, bad, hib)
+        sl_b = _sl(vb, good, bad, hib)
+        rows_html += (
+            f"<div class='cmp-row-left'>{sl_a} <b>{va_s}</b></div>"
+            f"<div class='cmp-row-mid'>{label}</div>"
+            f"<div class='cmp-row-right'><b>{vb_s}</b> {sl_b}</div>"
         )
-        _cb.markdown(
-            f"<div style='text-align:center;padding:4px 8px;font-size:0.82rem;color:#64748b;font-weight:600;'>{_lbl}</div>",
-            unsafe_allow_html=True,
-        )
-        _cc.markdown(
-            f"<div style='text-align:left;padding:4px 8px;font-size:0.95rem;'><b>{_vb}</b> {_slb}</div>",
-            unsafe_allow_html=True,
-        )
+
+    grid_html = f"""
+{_GRID_CSS}
+<div class="cmp-grid">
+  <div class="cmp-header cmp-left" style="color:#1d4ed8;">{team_a_sel}</div>
+  <div class="cmp-header cmp-mid">Metric</div>
+  <div class="cmp-header cmp-right" style="color:#dc2626;">{team_b_sel}</div>
+  {rows_html}
+</div>
+"""
+    st.markdown(grid_html, unsafe_allow_html=True)
 
     st.markdown("---")
 
+    # ── Projected opponents ───────────────────────────────────────────────────
     opp_a_col, opp_b_col = st.columns(2)
     with opp_a_col:
         st.markdown(f"**{team_a_sel} Projected Opponent**")
