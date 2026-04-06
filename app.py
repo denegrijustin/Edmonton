@@ -841,11 +841,11 @@ with team_tab:
     _tgv = team_games_view if not team_games_view.empty else team_games
     lcol, rcol = st.columns([1.35, 1])
     with lcol:
-        st.plotly_chart(plot_team_trend(_tgv), use_container_width=True)
+        st.plotly_chart(plot_team_trend(_tgv), width="stretch")
     with rcol:
-        st.plotly_chart(plot_momentum(_tgv), use_container_width=True)
+        st.plotly_chart(plot_momentum(_tgv), width="stretch")
 
-    st.plotly_chart(plot_impact_chart(_tgv), use_container_width=True)
+    st.plotly_chart(plot_impact_chart(_tgv), width="stretch")
 
     st.markdown("### Opponent damage profile")
     if not team_games.empty:
@@ -867,8 +867,8 @@ with team_tab:
         st.dataframe(
             opp_profile.sort_values("damageIndex", ascending=False)
             .style.format({"avgGoalDiff": "{:.2f}", "avgShotsAgainst": "{:.1f}", "damageIndex": "{:.1f}"}, na_rep="-")
-            .applymap(_stoplight_damage, subset=["damageIndex"]),
-            use_container_width=True,
+            .map(_stoplight_damage, subset=["damageIndex"]),
+            width="stretch",
             hide_index=True,
         )
 
@@ -880,23 +880,23 @@ with player_tab:
         latest = latest[["playerName", "position", "rollingGrade", "consistencyScore", "recent5AvgPoints", "seasonAvgPoints", "trendFlag", "toi_min"]].rename(columns={"rollingGrade": "Current Grade", "consistencyScore": "Consistency", "recent5AvgPoints": "Recent 5 Avg Pts", "seasonAvgPoints": "Season Avg Pts", "toi_min": "Last TOI"})
         top, bottom = st.columns([1.2, 1])
         with top:
-            st.plotly_chart(plot_player_progress(player_games, player_selected), use_container_width=True)
+            st.plotly_chart(plot_player_progress(player_games, player_selected), width="stretch")
         with bottom:
             selected_latest = latest[latest["playerName"] == player_selected]
             st.markdown("### Player snapshot")
             st.dataframe(
                 selected_latest.style
                 .format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}, na_rep="-")
-                .applymap(_stoplight_grade, subset=["Current Grade", "Consistency"]),
-                use_container_width=True, hide_index=True,
+                .map(_stoplight_grade, subset=["Current Grade", "Consistency"]),
+                width="stretch", hide_index=True,
             )
             st.markdown("### Top current grades")
             st.dataframe(
                 latest.sort_values("Current Grade", ascending=False).head(15).style
                 .format({"Current Grade": "{:.1f}", "Consistency": "{:.1f}", "Recent 5 Avg Pts": "{:.2f}", "Season Avg Pts": "{:.2f}", "Last TOI": "{:.1f}"}, na_rep="-")
-                .applymap(_stoplight_grade, subset=["Current Grade", "Consistency"])
-                .applymap(lambda v: "background-color: #fef9c3; color: #713f12" if v == "Heating Up" else ("background-color: #fee2e2; color: #991b1b" if v == "Cooling Off" else ""), subset=["trendFlag"]),
-                use_container_width=True, hide_index=True,
+                .map(_stoplight_grade, subset=["Current Grade", "Consistency"])
+                .map(lambda v: "background-color: #fef9c3; color: #713f12" if v == "Heating Up" else ("background-color: #fee2e2; color: #991b1b" if v == "Cooling Off" else ""), subset=["trendFlag"]),
+                width="stretch", hide_index=True,
             )
 
 with heat_tab:
@@ -907,10 +907,10 @@ with heat_tab:
         opp_shots = shot_events_view[~shot_events_view["isOilersShot"]]
         with sf_col:
             if not oilers_shots.empty:
-                st.plotly_chart(plot_rink_heatmap(oilers_shots, "Oilers Shots Taken"), use_container_width=True)
+                st.plotly_chart(plot_rink_heatmap(oilers_shots, "Oilers Shots Taken"), width="stretch")
         with sa_col:
             if not opp_shots.empty:
-                st.plotly_chart(plot_rink_heatmap(opp_shots, "Shots Against Oilers"), use_container_width=True)
+                st.plotly_chart(plot_rink_heatmap(opp_shots, "Shots Against Oilers"), width="stretch")
     else:
         st.info("No shot coordinate data available for the selected filters.")
 
@@ -924,9 +924,9 @@ with heat_tab:
         gf = heat_events[heat_events["isOilersGoal"]]
         ga = heat_events[~heat_events["isOilersGoal"]]
         with left:
-            st.plotly_chart(plot_rink_heatmap(gf, "Oilers Goals Scored Locations"), use_container_width=True)
+            st.plotly_chart(plot_rink_heatmap(gf, "Oilers Goals Scored Locations"), width="stretch")
         with right:
-            st.plotly_chart(plot_rink_heatmap(ga, "Oilers Goals Against Locations"), use_container_width=True)
+            st.plotly_chart(plot_rink_heatmap(ga, "Oilers Goals Against Locations"), width="stretch")
 
         st.markdown("### On-ice trend views")
         player_id_lookup = player_games[["playerName", "playerId"]].dropna().drop_duplicates() if not player_games.empty else pd.DataFrame(columns=["playerName", "playerId"])
@@ -940,13 +940,13 @@ with heat_tab:
             with ph_left:
                 ph_gf = player_heat[player_heat["isOilersGoal"]]
                 if not ph_gf.empty:
-                    st.plotly_chart(plot_rink_heatmap(ph_gf, f"{player_selected} On-Ice / Event-Linked Goals For"), use_container_width=True)
+                    st.plotly_chart(plot_rink_heatmap(ph_gf, f"{player_selected} On-Ice / Event-Linked Goals For"), width="stretch")
                 else:
                     st.info("No linked goals-for events found for this player under current filters.")
             with ph_right:
                 ph_ga = player_heat[~player_heat["isOilersGoal"]]
                 if not ph_ga.empty:
-                    st.plotly_chart(plot_rink_heatmap(ph_ga, f"{player_selected} On-Ice / Event-Linked Goals Against"), use_container_width=True)
+                    st.plotly_chart(plot_rink_heatmap(ph_ga, f"{player_selected} On-Ice / Event-Linked Goals Against"), width="stretch")
                 else:
                     st.info("No linked goals-against events found for this player under current filters.")
 
@@ -954,7 +954,7 @@ with heat_tab:
         zone_pivot = zone_summary.pivot(index="zone", columns="isOilersGoal", values="size").fillna(0).reset_index()
         zone_pivot.columns = ["zone", "Goals Against", "Goals For"] if len(zone_pivot.columns) == 3 else zone_pivot.columns
         st.markdown("### Zone summary")
-        st.dataframe(zone_pivot, use_container_width=True, hide_index=True)
+        st.dataframe(zone_pivot, width="stretch", hide_index=True)
 
 with outlook_tab:
     a, b, c, d = st.columns(4)
@@ -972,7 +972,7 @@ with outlook_tab:
             fig.add_trace(go.Scatter(x=pts_path["gameDate"], y=pts_path["cumulativePoints"], mode="lines+markers", name="Actual", line={**_SPLINE, "color": "#3b82f6", "width": 2.5}, marker=dict(size=6)))
             fig.add_trace(go.Scatter(x=pts_path["gameDate"], y=pts_path["paceLine82"], mode="lines", name="Projected pace", line=dict(dash="dash", color="#94a3b8", width=1.5)))
             fig.update_layout(**_CHART_LAYOUT, height=380, title="Points Path")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
     with right:
         st.markdown("### Stretch-run context")
         st.write(
@@ -987,7 +987,7 @@ with outlook_tab:
         if not remaining_games_df.empty:
             rem = remaining_games_df.assign(opponent=np.where(remaining_games_df["homeTeam"] == TEAM_TRI, remaining_games_df["awayTeam"], remaining_games_df["homeTeam"]))
             st.markdown("### Remaining schedule")
-            st.dataframe(rem[["gameDate", "homeTeam", "awayTeam", "opponent"]].rename(columns={"gameDate": "Date"}), use_container_width=True, hide_index=True)
+            st.dataframe(rem[["gameDate", "homeTeam", "awayTeam", "opponent"]].rename(columns={"gameDate": "Date"}), width="stretch", hide_index=True)
 
 with games_tab:
     st.markdown("### Full season schedule")
@@ -1008,8 +1008,8 @@ with games_tab:
             "Result": result_col,
         })
         st.dataframe(
-            full_sched.style.applymap(_stoplight_result, subset=["Result"]),
-            use_container_width=True,
+            full_sched.style.map(_stoplight_result, subset=["Result"]),
+            width="stretch",
             hide_index=True,
         )
 
@@ -1018,9 +1018,9 @@ with games_tab:
         st.dataframe(
             team_games.style
             .format({"teamFaceoffPct": "{:.1f}", "rolling3GoalDiff": "{:.2f}", "rolling3ShotDiff": "{:.2f}", "momentumScore": "{:.1f}"}, na_rep="-")
-            .applymap(_stoplight_result, subset=["result"])
-            .applymap(_stoplight_momentum, subset=["momentumScore"]),
-            use_container_width=True, hide_index=True,
+            .map(_stoplight_result, subset=["result"])
+            .map(_stoplight_momentum, subset=["momentumScore"]),
+            width="stretch", hide_index=True,
         )
     st.markdown("### Player game log")
     if not player_games.empty:
@@ -1028,6 +1028,6 @@ with games_tab:
         st.dataframe(
             pview[["gameDate", "goals", "assists", "points", "shots", "toi_min", "gameGrade", "rollingGrade", "trendFlag"]]
             .style.format({"toi_min": "{:.1f}", "gameGrade": "{:.1f}", "rollingGrade": "{:.1f}"}, na_rep="-")
-            .applymap(_stoplight_grade, subset=["gameGrade", "rollingGrade"]),
-            use_container_width=True, hide_index=True,
+            .map(_stoplight_grade, subset=["gameGrade", "rollingGrade"]),
+            width="stretch", hide_index=True,
         )
