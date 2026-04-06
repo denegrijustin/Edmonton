@@ -321,8 +321,6 @@ def _render_proxy_standings_table(
     conf_name: str,
     standings_df: pd.DataFrame,
 ) -> None:
-    from models.projections import build_playoff_projection_table
-
     proj_tbl = build_playoff_projection_table(standings_df, conf_name)
     if proj_tbl.empty:
         st.info("Conference standings data unavailable.")

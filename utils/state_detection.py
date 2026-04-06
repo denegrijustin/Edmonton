@@ -1,14 +1,10 @@
 """Season state detection utilities."""
 
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from config.settings import GAMES_IN_SEASON
-
-if TYPE_CHECKING:
-    pass
 
 
 class SeasonState(Enum):
