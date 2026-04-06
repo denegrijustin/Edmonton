@@ -152,7 +152,7 @@ def render(
                     }
                 )
                 .style.apply(_hl_team, axis=1),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
     else:

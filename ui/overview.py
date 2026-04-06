@@ -16,6 +16,7 @@ from ui.components import (
 )
 from utils.formatters import fmt_record, fmt_signed_int
 from utils.stoplights import stoplight
+from utils.streamlit_keys import mk_key
 
 
 def render(
@@ -167,8 +168,16 @@ def render(
         st.markdown("")
         ch1, ch2 = st.columns([1.35, 1])
         with ch1:
-            st.plotly_chart(plot_goal_diff_trend(sel_tg), use_container_width=True)
+            st.plotly_chart(
+                plot_goal_diff_trend(sel_tg),
+                width="stretch",
+                key=mk_key("overview", "chart", "goal_diff"),
+            )
         with ch2:
-            st.plotly_chart(plot_momentum(sel_tg), use_container_width=True)
+            st.plotly_chart(
+                plot_momentum(sel_tg),
+                width="stretch",
+                key=mk_key("overview", "chart", "momentum"),
+            )
     else:
         st.info("No completed game data available yet for this team.")

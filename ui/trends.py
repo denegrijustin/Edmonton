@@ -13,6 +13,7 @@ from ui.charts import (
 )
 from ui.components import result_card_html, upcoming_card_html
 from utils.stoplights import sl_momentum, sl_result
+from utils.streamlit_keys import mk_key
 
 
 def render(
@@ -28,14 +29,27 @@ def render(
 
     tc1, tc2 = st.columns(2)
     with tc1:
-        st.plotly_chart(plot_rolling_trend(sel_tg, window=5), use_container_width=True)
+        st.plotly_chart(
+            plot_rolling_trend(sel_tg, window=5),
+            width="stretch",
+            key=mk_key("trends", "chart", "rolling_5"),
+        )
     with tc2:
-        st.plotly_chart(plot_rolling_trend(sel_tg, window=10), use_container_width=True)
+        st.plotly_chart(
+            plot_rolling_trend(sel_tg, window=10),
+            width="stretch",
+            key=mk_key("trends", "chart", "rolling_10"),
+        )
 
-    st.plotly_chart(plot_goal_diff_trend(sel_tg), use_container_width=True)
+    st.plotly_chart(
+        plot_goal_diff_trend(sel_tg),
+        width="stretch",
+        key=mk_key("trends", "chart", "goal_diff"),
+    )
     st.plotly_chart(
         plot_points_path(sel_tg, sel_outlook.get("projected_points", 0)),
-        use_container_width=True,
+        width="stretch",
+        key=mk_key("trends", "chart", "points_path"),
     )
 
     # Last 5 results
@@ -107,6 +121,7 @@ def render(
         )
         .map(sl_result, subset=["result"])
         .map(sl_momentum, subset=["momentumScore"]),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
+        key=mk_key("trends", "dataframe", "game_log"),
     )

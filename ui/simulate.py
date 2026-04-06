@@ -16,6 +16,7 @@ from providers.metrics_provider import compute_team_metrics
 from ui.charts import plot_sim_histogram
 from ui.components import logo_card_html, prob_bar_html
 from utils.stoplights import stoplight
+from utils.streamlit_keys import mk_key
 
 
 def render(
@@ -133,7 +134,8 @@ def render(
     with res_right:
         st.plotly_chart(
             plot_sim_histogram(a_arr, b_arr, sim_a, sim_b),
-            use_container_width=True,
+            width="stretch",
+            key=mk_key("simulate", "chart", f"histogram_{sim_a}_{sim_b}"),
         )
 
         st.markdown("---")
