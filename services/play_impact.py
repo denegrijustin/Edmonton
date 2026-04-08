@@ -283,12 +283,13 @@ def _compute_play_impact(
 
     # Goal-specific bonuses
     if event_type == "goal":
-        # Go-ahead goal
+        # Note: home_score/away_score from API reflect state AFTER the goal
+        # Tying goal: scores are now equal (were +1 before)
         if home_score == away_score:
-            impact *= 1.3
-        # Tying goal
-        if abs(home_score - away_score) == 1:
             impact *= 1.2
+        # Go-ahead goal: one team now leads by 1 (were tied before)
+        if abs(home_score - away_score) == 1:
+            impact *= 1.3
         # Power play / short handed
         situation = details.get("situationCode", "")
         if "PP" in str(situation).upper() or details.get("goalType") == "power-play":

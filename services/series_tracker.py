@@ -159,7 +159,8 @@ def _build_status_string(
 ) -> str:
     """Build a human-readable series status string."""
     if is_complete and winner:
-        return f"{winner} wins 4-{min(top_wins, bottom_wins)}"
+        loser_wins = bottom_wins if winner == top else top_wins
+        return f"{winner} wins 4-{loser_wins}"
     if top_wins == bottom_wins:
         if top_wins == 0:
             return "Series not started"
