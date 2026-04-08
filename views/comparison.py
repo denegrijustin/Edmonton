@@ -234,7 +234,7 @@ def render(
             st.markdown(
                 prob_bar_html(
                     f"{team_a} Win",
-                    sim_result.get("a_win_pct", 0) * 100,
+                    sim_result.get("a_win_pct", 0),  # Already 0-100
                     "#3b82f6",
                 ),
                 unsafe_allow_html=True,
@@ -243,7 +243,7 @@ def render(
             st.markdown(
                 prob_bar_html(
                     f"{team_b} Win",
-                    sim_result.get("b_win_pct", 0) * 100,
+                    sim_result.get("b_win_pct", 0),  # Already 0-100
                     "#ef4444",
                 ),
                 unsafe_allow_html=True,
@@ -261,7 +261,7 @@ def render(
             )
         with gc2:
             st.markdown(
-                kpi_html("OT Probability", fmt_pct(sim_result.get("ot_pct", 0) * 100), "Simulated"),
+                kpi_html("OT Probability", fmt_pct(sim_result.get("ot_pct", 0)), "Simulated"),  # Already 0-100
                 unsafe_allow_html=True,
             )
         with gc3:

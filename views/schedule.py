@@ -81,7 +81,8 @@ def _schedule_difficulty(
         st.info("Schedule data unavailable.")
         return
 
-    remaining = sel_schedule[sel_schedule.get("isCompleted", pd.Series(dtype=bool)) == False]  # noqa: E712
+    completed_col = sel_schedule.get("isCompleted", pd.Series(dtype=bool))
+    remaining = sel_schedule[~completed_col.astype(bool)]
     if remaining.empty:
         st.info("No remaining games on the schedule.")
         return
@@ -226,7 +227,8 @@ def render(
 
     # ── Upcoming games cards ──────────────────────────────────────────────
     st.markdown("#### Next Games")
-    upcoming = sel_schedule[sel_schedule.get("isCompleted", pd.Series(dtype=bool)) == False]  # noqa: E712
+    completed_series = sel_schedule.get("isCompleted", pd.Series(dtype=bool))
+    upcoming = sel_schedule[~completed_series.astype(bool)]
 
     if upcoming.empty:
         st.info("No upcoming games on the schedule.")

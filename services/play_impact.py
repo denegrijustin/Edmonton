@@ -53,7 +53,7 @@ def find_last_completed_game(
     if schedule.empty:
         return None
 
-    completed = schedule[schedule["isCompleted"] == True].copy()  # noqa: E712
+    completed = schedule[schedule["isCompleted"].astype(bool)].copy()
     if completed.empty:
         return None
 

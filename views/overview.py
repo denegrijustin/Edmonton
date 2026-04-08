@@ -71,7 +71,8 @@ def _upcoming_games_html(
     if sel_schedule is None or sel_schedule.empty:
         return "<p style='color:#94a3b8;font-size:0.85rem;'>No upcoming games.</p>"
 
-    upcoming = sel_schedule[sel_schedule.get("isCompleted", pd.Series(dtype=bool)) == False]  # noqa: E712
+    completed_col = sel_schedule.get("isCompleted", pd.Series(dtype=bool))
+    upcoming = sel_schedule[~completed_col.astype(bool)]
     if upcoming.empty:
         return "<p style='color:#94a3b8;font-size:0.85rem;'>No upcoming games scheduled.</p>"
 
