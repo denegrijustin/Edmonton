@@ -189,6 +189,7 @@ with tabs[1]:  # Standings
     standings.render(
         selected_team=selected_team,
         standings_df=standings_df,
+        team_metrics_dict=team_metrics_dict,
         team_name_map=team_name_map,
     )
 

@@ -35,7 +35,7 @@ def _render_matchup_result(
 
     c1, c2 = st.columns(2)
     with c1:
-        a_pct = result.get("a_win_pct", 0) * 100
+        a_pct = result.get("a_win_pct", 0)  # Already 0-100 from monte_carlo_sim
         st.markdown(
             f"<div style='text-align:center;'>"
             f"<img src='{logo_url(team_a)}' width='48' height='48'/>"
@@ -53,7 +53,7 @@ def _render_matchup_result(
         )
 
     with c2:
-        b_pct = result.get("b_win_pct", 0) * 100
+        b_pct = result.get("b_win_pct", 0)  # Already 0-100 from monte_carlo_sim
         st.markdown(
             f"<div style='text-align:center;'>"
             f"<img src='{logo_url(team_b)}' width='48' height='48'/>"
@@ -71,9 +71,9 @@ def _render_matchup_result(
         )
 
     # Additional details
-    ot_pct = result.get("ot_pct", 0) * 100
-    a_reg = result.get("a_reg_win_pct", 0) * 100
-    b_reg = result.get("b_reg_win_pct", 0) * 100
+    ot_pct = result.get("ot_pct", 0)  # Already 0-100
+    a_reg = result.get("a_reg_win_pct", 0)  # Already 0-100
+    b_reg = result.get("b_reg_win_pct", 0)  # Already 0-100
     dc1, dc2, dc3 = st.columns(3)
     with dc1:
         st.markdown(kpi_html("OT Probability", fmt_pct(ot_pct), "Simulated"), unsafe_allow_html=True)

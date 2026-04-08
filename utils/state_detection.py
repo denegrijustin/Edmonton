@@ -17,7 +17,7 @@ def detect_season_state(season: str, standings_df: pd.DataFrame) -> SeasonState:
     """Detect the current phase of the NHL season.
 
     Detection logic:
-    - If playoff series exist for this season → PLAYOFFS
+    - If playoff games (gameType 3) detected in team schedules → PLAYOFFS
     - Elif any team has fewer than 82 gamesPlayed → REGULAR_SEASON
     - Else → OFFSEASON
 
@@ -32,11 +32,13 @@ def detect_season_state(season: str, standings_df: pd.DataFrame) -> SeasonState:
     -------
     SeasonState
     """
-    # Defer import to avoid circular dependency issues at module load time.
+    # Check for playoff games using schedule metadata (not the unreliable
+    # playoffs/carousel endpoint).
     try:
-        from providers.playoff_provider import is_playoff_active  # noqa: PLC0415
+        from services.playoff_state import detect_playoff_state  # noqa: PLC0415
 
-        if is_playoff_active(season):
+        ps = detect_playoff_state(standings_df, season=season)
+        if ps.playoffs_started:
             return SeasonState.PLAYOFFS
     except Exception:
         pass

@@ -295,24 +295,27 @@ class TestDetectSeasonState:
         """All teams at 82 GP and no playoff data → OFFSEASON."""
         stdf = _make_standings()
         stdf["gamesPlayed"] = 82
-        # Monkeypatch is_playoff_active to return False
+        # Mock detect_playoff_state to indicate no playoffs
         import unittest.mock as mock
-        with mock.patch("providers.playoff_provider.is_playoff_active", return_value=False):
+        from services.playoff_state import PlayoffState
+        with mock.patch("services.playoff_state.detect_playoff_state", return_value=PlayoffState(playoffs_started=False)):
             state = detect_season_state("20252026", stdf)
         assert state == SeasonState.OFFSEASON
 
     def test_playoffs_when_is_playoff_active_true(self):
-        """is_playoff_active=True → PLAYOFFS regardless of standings."""
+        """Playoff games detected in schedules → PLAYOFFS regardless of standings."""
         stdf = _make_standings()
         import unittest.mock as mock
-        with mock.patch("providers.playoff_provider.is_playoff_active", return_value=True):
+        from services.playoff_state import PlayoffState
+        with mock.patch("services.playoff_state.detect_playoff_state", return_value=PlayoffState(playoffs_started=True, current_round=1)):
             state = detect_season_state("20252026", stdf)
         assert state == SeasonState.PLAYOFFS
 
     def test_empty_standings_defaults_to_offseason(self):
         """Empty standings with no playoffs → OFFSEASON."""
         import unittest.mock as mock
-        with mock.patch("providers.playoff_provider.is_playoff_active", return_value=False):
+        from services.playoff_state import PlayoffState
+        with mock.patch("services.playoff_state.detect_playoff_state", return_value=PlayoffState(playoffs_started=False)):
             state = detect_season_state("20252026", pd.DataFrame())
         assert state == SeasonState.OFFSEASON
 
