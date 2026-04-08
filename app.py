@@ -1,16 +1,26 @@
 """NHL Intelligence Dashboard — main entry point.
 
-This is a thin orchestrator.  All logic lives in dedicated modules:
+Thin orchestrator.  All logic lives in dedicated modules:
 
 - config/          Application constants
 - utils/           Formatting, stoplights, logos, validation
 - data/            Loaders, caching, team-name mappings
 - providers/       NHL API providers
 - models/          Projections, Monte Carlo simulation, season sim
-- ui/              Tab renderers, components, charts, CSS
+- services/        Playoff state, series tracking, simulation wrapper,
+                   player impact, play impact
+- views/           Tab renderers (overview, standings, schedule, comparison,
+                   playoff_race, bracket, simulator, player_impact, top_plays)
+- ui/              Shared components, charts, CSS
+
+Key design rules:
+- Initial page load is fast: only standings + schedule are fetched.
+- Simulations run ONLY on explicit user action (button click).
+- All model outputs are clearly labeled as Projected/Simulated/Estimated.
+- Never invent, fabricate, or hardcode standings, schedule, or stat data.
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -20,9 +30,22 @@ from data.mappings import build_team_name_map
 from models.projections import compute_outlook
 from providers.metrics_provider import build_league_data, compute_team_metrics
 from providers.schedule_provider import build_team_games
-from ui import compare, overview, playoff_race, simulate, trends
+from services.playoff_state import PlayoffState, detect_playoff_state
+from services.series_tracker import build_series_from_games
 from ui.styles import inject_css
+from utils.logos import logo_url
 from utils.state_detection import SeasonState, detect_season_state
+from views import (
+    bracket,
+    comparison,
+    overview,
+    player_impact,
+    playoff_race,
+    schedule,
+    simulator,
+    standings,
+    top_plays,
+)
 
 # ── Page config (must be first Streamlit command) ─────────────────────────────
 st.set_page_config(
@@ -42,28 +65,19 @@ with st.sidebar:
         ["Auto", "Force Regular Season", "Force Playoffs", "Force Offseason"],
         key="state_override",
     )
-    sim_count = st.number_input(
-        "Simulations",
-        min_value=100,
-        max_value=5000,
-        value=1000,
-        step=100,
-        key="sim_count",
-    )
-    if st.button("🔄 Refresh Simulations", key="refresh_sims"):
+    if st.button("🔄 Refresh Data", key="refresh_data"):
         st.cache_data.clear()
         st.rerun()
 
-# ── Load league data at startup ───────────────────────────────────────────────
-with st.spinner("Loading NHL standings data…"):
+# ── Load league data at startup (fast — standings only) ───────────────────────
+with st.spinner("Loading NHL standings…"):
     try:
         standings_df, team_metrics_dict = build_league_data()
     except Exception as _e:
         standings_df = pd.DataFrame()
         team_metrics_dict: Dict[str, Dict] = {}
         st.warning(
-            f"Failed to load NHL standings data (check network connection and try refreshing). "
-            f"Details: {_e}"
+            f"Failed to load NHL standings (check network). Details: {_e}"
         )
 
 # ── Detect season state ───────────────────────────────────────────────────────
@@ -76,34 +90,23 @@ _state_map = {
 }
 season_state: SeasonState = _state_map.get(state_override, _auto_state)
 
-# ── Load playoff series (only during playoffs) ────────────────────────────────
-playoff_series: List[Dict] = []
+# ── Detect playoff state (from schedule metadata, not failed API) ─────────────
+playoff_state_obj = PlayoffState(playoffs_started=False)
+series_list: List[Dict[str, Any]] = []
+
 if season_state == SeasonState.PLAYOFFS:
     try:
-        from providers.playoff_provider import get_playoff_series_list
-
-        playoff_series = get_playoff_series_list(SEASON)
+        playoff_state_obj = detect_playoff_state(standings_df, season=SEASON)
+        if playoff_state_obj.playoffs_started:
+            series_list = build_series_from_games(
+                playoff_state_obj.playoff_games
+            )
     except Exception:
-        playoff_series = []
+        pass
 
-# ── Run season simulation (cached in session_state) ───────────────────────────
-sim_results: Optional[Dict] = None
-if season_state == SeasonState.REGULAR_SEASON and not standings_df.empty:
-    _sim_key = f"sim_{SEASON}_{int(sim_count)}"
-    if _sim_key not in st.session_state:
-        with st.spinner(f"Running {int(sim_count):,} season simulations…"):
-            try:
-                from models.season_sim import get_all_remaining_games, run_season_simulation
+# NO simulation at startup — simulations are on-demand only.
 
-                _remaining = get_all_remaining_games(standings_df)
-                st.session_state[_sim_key] = run_season_simulation(
-                    standings_df, _remaining, team_metrics_dict, n_sims=int(sim_count)
-                )
-            except Exception as _sim_err:
-                st.session_state[_sim_key] = None
-    sim_results = st.session_state.get(_sim_key)
-
-# Sorted team list; ensure DEFAULT is first if available
+# ── Team list ─────────────────────────────────────────────────────────────────
 all_teams: List[str] = (
     sorted(standings_df["teamAbbrev"].dropna().unique().tolist())
     if not standings_df.empty
@@ -114,11 +117,11 @@ if DEFAULT_TEAM in all_teams:
 
 team_name_map = build_team_name_map(standings_df)
 
-# ── Header ────────────────────────────────────────────────────────────────────
+# ── Header with logo ─────────────────────────────────────────────────────────
 hdr_left, hdr_right = st.columns([4, 1])
 with hdr_left:
     st.markdown(
-        "<h1 style='margin-bottom:0;font-size:1.75rem;'>🏒 NHL Intelligence Dashboard</h1>",
+        "<h1 style='margin-bottom:0;font-size:1.6rem;'>🏒 NHL Intelligence Dashboard</h1>",
         unsafe_allow_html=True,
     )
 with hdr_right:
@@ -131,23 +134,45 @@ with hdr_right:
     )
 
 sel_name = team_name_map.get(selected_team, selected_team)
-sel_metrics = team_metrics_dict.get(selected_team, compute_team_metrics(selected_team, standings_df))
+sel_metrics = team_metrics_dict.get(
+    selected_team, compute_team_metrics(selected_team, standings_df)
+)
 sel_outlook = compute_outlook(selected_team, standings_df, team_metrics_dict)
 
-# Load detailed game data for selected team
-with st.spinner(f"Loading {selected_team} game data…"):
+# Show selected team logo + abbreviation in compact header
+st.markdown(
+    f"<div style='display:flex;align-items:center;gap:8px;margin-bottom:6px;'>"
+    f"<img src='{logo_url(selected_team)}' width='36' height='36'/>"
+    f"<span style='font-size:1.1rem;font-weight:700;'>{sel_name}</span>"
+    f"<span style='color:#64748b;font-size:0.9rem;'>{selected_team}</span>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+# Load schedule for selected team (lightweight)
+with st.spinner(f"Loading {selected_team} schedule…"):
     try:
         sel_schedule, sel_tg = build_team_games(selected_team)
     except Exception:
         sel_schedule = pd.DataFrame()
         sel_tg = pd.DataFrame()
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_ov, tab_tr, tab_pl, tab_cmp, tab_sim = st.tabs(
-    ["📊 Overview", "📈 Trends", "🏆 Playoff Race", "⚖️ Compare", "🎲 Simulate"]
-)
+# ── Build tab list based on season state ──────────────────────────────────────
+_TAB_LABELS = [
+    "📊 Overview",
+    "🏆 Standings",
+    "📅 Schedule",
+    "⚖️ Compare",
+    "🏒 Playoff Race",
+    "🗂️ Bracket",
+    "🎲 Simulator",
+    "📈 Player Impact",
+    "🎬 Top Plays",
+]
 
-with tab_ov:
+tabs = st.tabs(_TAB_LABELS)
+
+with tabs[0]:  # Overview
     overview.render(
         selected_team=selected_team,
         sel_name=sel_name,
@@ -160,38 +185,79 @@ with tab_ov:
         team_name_map=team_name_map,
     )
 
-with tab_tr:
-    trends.render(
+with tabs[1]:  # Standings
+    standings.render(
         selected_team=selected_team,
-        sel_tg=sel_tg,
-        sel_schedule=sel_schedule,
-        sel_outlook=sel_outlook,
+        standings_df=standings_df,
+        team_metrics_dict=team_metrics_dict,
+        team_name_map=team_name_map,
     )
 
-with tab_pl:
+with tabs[2]:  # Schedule
+    schedule.render(
+        selected_team=selected_team,
+        sel_name=sel_name,
+        sel_schedule=sel_schedule,
+        sel_tg=sel_tg,
+        standings_df=standings_df,
+        team_metrics_dict=team_metrics_dict,
+        team_name_map=team_name_map,
+    )
+
+with tabs[3]:  # Compare
+    comparison.render(
+        all_teams=all_teams,
+        standings_df=standings_df,
+        team_metrics_dict=team_metrics_dict,
+        team_name_map=team_name_map,
+    )
+
+with tabs[4]:  # Playoff Race
     playoff_race.render(
         selected_team=selected_team,
+        sel_name=sel_name,
         sel_metrics=sel_metrics,
         sel_outlook=sel_outlook,
         standings_df=standings_df,
         team_metrics_dict=team_metrics_dict,
         team_name_map=team_name_map,
         season_state=season_state,
-        sim_results=sim_results,
-        playoff_series=playoff_series,
     )
 
-with tab_cmp:
-    compare.render(
+with tabs[5]:  # Bracket
+    bracket.render(
+        selected_team=selected_team,
+        standings_df=standings_df,
+        team_metrics_dict=team_metrics_dict,
+        team_name_map=team_name_map,
+        season_state=season_state,
+        playoff_state_obj=playoff_state_obj,
+        series_list=series_list,
+        sel_outlook=sel_outlook,
+    )
+
+with tabs[6]:  # Simulator
+    simulator.render(
         all_teams=all_teams,
         standings_df=standings_df,
         team_metrics_dict=team_metrics_dict,
         team_name_map=team_name_map,
+        season_state=season_state,
+        series_list=series_list,
     )
 
-with tab_sim:
-    simulate.render(
-        all_teams=all_teams,
-        standings_df=standings_df,
-        team_metrics_dict=team_metrics_dict,
+with tabs[7]:  # Player Impact
+    player_impact.render(
+        selected_team=selected_team,
+        sel_name=sel_name,
+        sel_tg=sel_tg,
+        team_name_map=team_name_map,
+    )
+
+with tabs[8]:  # Top Plays
+    top_plays.render(
+        selected_team=selected_team,
+        sel_name=sel_name,
+        sel_schedule=sel_schedule,
+        sel_tg=sel_tg,
     )
