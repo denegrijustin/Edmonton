@@ -195,8 +195,13 @@ def _render_inner(
 
     # ── Next game card ────────────────────────────────────────────────────
     if sel_schedule is not None and not sel_schedule.empty:
-        upcoming = sel_schedule[sel_schedule.get("isCompleted", sel_schedule.get("gameState", "")) == False] if "isCompleted" in sel_schedule.columns else sel_schedule[sel_schedule["gameState"] != "OFF"]
-        if hasattr(upcoming, "empty") and not upcoming.empty:
+        if "isCompleted" in sel_schedule.columns:
+            upcoming = sel_schedule[sel_schedule["isCompleted"] == False]
+        elif "gameState" in sel_schedule.columns:
+            upcoming = sel_schedule[sel_schedule["gameState"] != "OFF"]
+        else:
+            upcoming = sel_schedule.head(0)
+        if not upcoming.empty:
             nxt = upcoming.iloc[0]
             opp_home = nxt.get("homeTeam", "")
             opp_away = nxt.get("awayTeam", "")

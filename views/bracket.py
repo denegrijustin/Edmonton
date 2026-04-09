@@ -3,10 +3,10 @@
 import streamlit as st
 
 from config.settings import PLAYOFF_BRACKET_MAP
+from providers.standings_provider import get_standings
 from services.mode_state import AppMode
 from services.series_tracker import compute_series_state, build_bracket_state
-from services.simulation import simulate_playoff_series, simulate_full_playoffs, SIM_DEPTHS, get_sim_depth
-from models.projections import compute_outlook
+from services.simulation import simulate_full_playoffs, SIM_DEPTHS, get_sim_depth
 from ui.components import kpi_html, prob_bar_html
 from utils.formatters import fmt_pct
 from utils.logos import logo_url
@@ -164,9 +164,6 @@ def _render_inner(selected_team, team_metrics_dict, team_name_map,
 
     # Build projected matchups from bracket map
     # We need conference standings to project seeds
-    # For simplicity, show top-8 per conference as projected matchups
-    from providers.standings_provider import get_standings
-
     standings = get_standings()
     if standings is None or standings.empty:
         st.info("Standings data unavailable for bracket projection.")

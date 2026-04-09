@@ -174,9 +174,14 @@ def _render_inner(
     # ── Competitor table ──────────────────────────────────────────────────
     st.markdown("#### Conference Competitors")
     if conf_df is not None and not conf_df.empty:
-        near = conf_df[
-            conf_df["conferenceSequence"].between(max(1, conf_seq - 4), conf_seq + 4)
-        ].copy() if conf_seq else conf_df.head(10)
+        if conf_seq:
+            low = max(1, conf_seq - 4)
+            high = conf_seq + 4
+            near = conf_df[
+                conf_df["conferenceSequence"].between(low, high)
+            ].copy()
+        else:
+            near = conf_df.head(10)
 
         rows_html = (
             "<table style='width:100%;border-collapse:collapse;font-size:0.82rem;'>"
